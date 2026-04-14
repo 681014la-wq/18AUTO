@@ -244,6 +244,120 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  // Content Script → UPLOAD_IMAGE (MAIN world에서 Flow에 이미지 업로드)
+  if (msg.type === 'UPLOAD_IMAGE') {
+    const tabId = sender.tab?.id;
+    if (!tabId) { sendResponse({ ok: false, error: 'no tab' }); return false; }
+    chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      func: (dataUrl, fileName) => {
+        return new Promise(async (resolve) => {
+          try {
+            // dataURL → File 변환
+            const res = await fetch(dataUrl);
+            const blob = await res.blob();
+            const file = new File([blob], fileName, { type: blob.type });
+
+            // 1. "+" 버튼 찾기 (Shadow DOM 관통)
+            const allBtns = [];
+            function collect(root) {
+              root.querySelectorAll('button,[role="button"],[tabindex="0"]').forEach(b => allBtns.push(b));
+              root.querySelectorAll('*').forEach(el => { if (el.shadowRoot) collect(el.shadowRoot); });
+            }
+            collect(document);
+
+            // "+" 또는 "add" 버튼 찾기
+            let addBtn = null;
+            for (const b of allBtns) {
+              const t = (b.innerText || b.getAttribute('aria-label') || '').toLowerCase().trim();
+              const icon = b.querySelector('span.material-icons, mat-icon, .material-symbols-outlined');
+              const iconText = icon ? icon.textContent.trim().toLowerCase() : '';
+              if (t === '+' || t === 'add' || t === '추가' || iconText === 'add' || iconText === 'add_circle') {
+                // 입력창 근처의 + 버튼만
+                const rect = b.getBoundingClientRect();
+                if (rect.bottom > window.innerHeight * 0.5 && rect.width > 0) {
+                  addBtn = b;
+                  break;
+                }
+              }
+            }
+
+            if (!addBtn) {
+              // fallback: 입력창 왼쪽 가장 가까운 버튼
+              const input = document.querySelector('div[data-slate-editor="true"]')
+                         || document.querySelector('div[contenteditable="true"]');
+              if (input) {
+                const inputRect = input.getBoundingClientRect();
+                const nearby = allBtns.filter(b => {
+                  const r = b.getBoundingClientRect();
+                  return r.width > 0 && r.height > 0
+                    && Math.abs(r.top - inputRect.top) < 60
+                    && r.right < inputRect.left + 80;
+                });
+                if (nearby.length) addBtn = nearby[0];
+              }
+            }
+
+            if (addBtn) {
+              addBtn.click();
+              await new Promise(r => setTimeout(r, 800));
+            }
+
+            // 2. 파일 input 찾기 (visible input[type="file"])
+            let fileInput = null;
+            const allInputs = [];
+            function collectInputs(root) {
+              root.querySelectorAll('input[type="file"]').forEach(i => allInputs.push(i));
+              root.querySelectorAll('*').forEach(el => { if (el.shadowRoot) collectInputs(el.shadowRoot); });
+            }
+            collectInputs(document);
+            fileInput = allInputs[allInputs.length - 1]; // 마지막(가장 최근) file input
+
+            if (fileInput) {
+              // DataTransfer로 파일 주입
+              const dt = new DataTransfer();
+              dt.items.add(file);
+              fileInput.files = dt.files;
+              fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+              fileInput.dispatchEvent(new Event('input', { bubbles: true }));
+              resolve('OK_FILE_INPUT');
+              return;
+            }
+
+            // 3. fallback: 드래그앤드롭 시뮬레이션
+            const dropTarget = document.querySelector('div[data-slate-editor="true"]')
+                            || document.querySelector('div[contenteditable="true"]')
+                            || document.querySelector('[class*="drop"]')
+                            || document.body;
+
+            const dtDrop = new DataTransfer();
+            dtDrop.items.add(file);
+
+            const dragEnter = new DragEvent('dragenter', { dataTransfer: dtDrop, bubbles: true });
+            const dragOver  = new DragEvent('dragover',  { dataTransfer: dtDrop, bubbles: true });
+            const drop      = new DragEvent('drop',      { dataTransfer: dtDrop, bubbles: true });
+
+            dropTarget.dispatchEvent(dragEnter);
+            dropTarget.dispatchEvent(dragOver);
+            dropTarget.dispatchEvent(drop);
+
+            resolve('OK_DROP');
+          } catch (e) {
+            resolve('FAIL:' + e.message);
+          }
+        });
+      },
+      args: [msg.dataUrl, msg.fileName]
+    }).then(results => {
+      const r = results?.[0]?.result || 'UNKNOWN';
+      sendResponse({ ok: r.startsWith('OK'), result: r });
+    }).catch(e => {
+      sendResponse({ ok: false, error: e.message });
+    });
+    return true;
+  }
+
   // Side Panel → MANUAL_RUN
   if (msg.type === 'MANUAL_RUN') {
     handleManualRun(msg, sendResponse);
@@ -267,6 +381,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // Side Panel → INSPECT_DOM
   if (msg.type === 'INSPECT_DOM') {
     handleInspectDom(sendResponse);
+    return true;
+  }
+
+  // Side Panel → SCAN_GALLERY (Content Script로 중계)
+  if (msg.type === 'SCAN_GALLERY') {
+    (async () => {
+      try {
+        const tabId = await findFlowTab();
+        if (!tabId) { sendResponse({ urls: [], error: 'Flow 탭 없음' }); return; }
+        const res = await chrome.tabs.sendMessage(tabId, { type: 'SCAN_GALLERY' });
+        sendResponse(res || { urls: [] });
+      } catch (e) {
+        sendResponse({ urls: [], error: e.message });
+      }
+    })();
     return true;
   }
 

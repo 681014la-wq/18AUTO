@@ -44,14 +44,91 @@ tabBtns.forEach(btn => {
 // ─────────────────────────────────────────────
 let currentMode = 't2i';
 
+// ─── 캐릭터 이미지 저장 (i2i 모드) ───
+const characterImages = []; // { name, dataUrl, file }
+
 document.querySelectorAll('.mode-btn').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     currentMode = btn.dataset.mode;
+    // i2i 모드일 때만 이미지 업로드 섹션 표시
+    const i2iSection = document.getElementById('i2i-section');
+    if (i2iSection) i2iSection.style.display = currentMode === 'i2i' ? 'block' : 'none';
     updateQueue(parsePrompts(document.getElementById('prompt-input').value));
   });
 });
+
+// ─── 이미지 업로드 핸들링 ───
+document.getElementById('btn-upload-images')?.addEventListener('click', () => {
+  document.getElementById('image-input').click();
+});
+
+document.getElementById('image-input')?.addEventListener('change', (e) => {
+  const files = Array.from(e.target.files);
+  if (!files.length) return;
+  files.forEach(file => {
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const name = file.name.replace(/\.[^.]+$/, ''); // 확장자 제거
+      characterImages.push({ name, dataUrl: ev.target.result, fileName: file.name });
+      renderImagePreviews();
+      addLog(`캐릭터 이미지 추가: ${file.name}`, 'success');
+    };
+    reader.readAsDataURL(file);
+  });
+  e.target.value = '';
+});
+
+function renderImagePreviews() {
+  const container = document.getElementById('image-preview-list');
+  const hint = document.getElementById('image-count-hint');
+  if (!container) return;
+  container.innerHTML = characterImages.map((img, i) =>
+    `<div class="image-preview-item" data-index="${i}">
+      <img src="${img.dataUrl}" alt="${img.name}" />
+      <span class="img-name">${img.name}</span>
+      <button class="img-remove" data-index="${i}" title="제거">&times;</button>
+    </div>`
+  ).join('');
+  if (hint) hint.textContent = characterImages.length
+    ? `${characterImages.length}개 이미지 업로드됨`
+    : '업로드된 이미지가 없습니다.';
+  // 제거 버튼 이벤트
+  container.querySelectorAll('.img-remove').forEach(btn => {
+    btn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const idx = parseInt(btn.dataset.index);
+      characterImages.splice(idx, 1);
+      renderImagePreviews();
+    });
+  });
+}
+
+// ─── 자동 캐릭터 매칭 ───
+function matchCharacterImages(promptText) {
+  const autoMatch = document.getElementById('toggle-auto-character')?.checked;
+  const maxImages = parseInt(document.getElementById('max-images-per-prompt')?.value) || 1;
+  if (!autoMatch || !characterImages.length) return [];
+
+  const matched = [];
+  const promptLower = promptText.toLowerCase();
+
+  for (const img of characterImages) {
+    // 파일명(확장자 제외)이 프롬프트에 포함되면 매칭
+    if (promptLower.includes(img.name.toLowerCase())) {
+      matched.push(img);
+      if (matched.length >= maxImages) break;
+    }
+  }
+
+  // 매칭된 것이 없으면 첫 번째 이미지를 기본으로 사용
+  if (!matched.length && characterImages.length) {
+    matched.push(characterImages[0]);
+  }
+
+  return matched.slice(0, maxImages);
+}
 
 // ─────────────────────────────────────────────
 // .txt 업로드
@@ -167,17 +244,30 @@ document.getElementById('btn-run').addEventListener('click', async () => {
   const dlImage     = document.getElementById('s-dl-image').value || '1k';
   const autoRename  = document.getElementById('toggle-autoname').checked;
 
-  const payloads = prompts.map((p, i) => ({
-    prompt: p,
-    mode: currentMode,
-    outputCount,
-    folderName,
-    promptIndex: i + 1,
-    maxRetries,
-    downloadVideoQuality: dlVideo,
-    downloadImageQuality: dlImage,
-    autoRename,
-  }));
+  const payloads = prompts.map((p, i) => {
+    const payload = {
+      prompt: p,
+      mode: currentMode,
+      outputCount,
+      folderName,
+      promptIndex: i + 1,
+      maxRetries,
+      downloadVideoQuality: dlVideo,
+      downloadImageQuality: dlImage,
+      autoRename,
+    };
+    // i2i 모드: 프롬프트별 매칭된 캐릭터 이미지 첨부
+    if (currentMode === 'i2i' && characterImages.length) {
+      const matched = matchCharacterImages(p);
+      payload.characterImages = matched.map(m => ({ name: m.name, dataUrl: m.dataUrl, fileName: m.fileName }));
+    }
+    // 갤러리 영상 변환: _galleryAnimateImages가 있으면 각 페이로드에 이미지 첨부
+    if (currentMode === 'i2v' && window._galleryAnimateImages && window._galleryAnimateImages.length) {
+      const gImg = window._galleryAnimateImages[i] || window._galleryAnimateImages[0];
+      payload.galleryImage = { url: gImg.url, name: gImg.name };
+    }
+    return payload;
+  });
 
   const groupId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
   currentGroupId = groupId;
@@ -186,6 +276,9 @@ document.getElementById('btn-run').addEventListener('click', async () => {
   setStatus(`배치 전송 중... (${prompts.length}개)`, 'info');
   setProgress(0, prompts.length);
   addLog(`배치 시작: ${prompts.length}개 프롬프트 | 모드: ${currentMode} | 폴더: ${folderName}`, 'info');
+
+  // 갤러리 영상 변환 이미지 사용 후 초기화
+  window._galleryAnimateImages = null;
 
   chrome.runtime.sendMessage({
     type: 'MANUAL_RUN',
@@ -463,6 +556,223 @@ document.getElementById('btn-pick-folder').addEventListener('click', async () =>
       addLog(`폴더 선택 실패: ${e.message}`, 'error');
     }
   }
+});
+
+// ═════════════════════════════════════════════
+// 갤러리 탭
+// ═════════════════════════════════════════════
+const galleryGrid       = document.getElementById('gallery-grid');
+const galleryCount      = document.getElementById('gallery-count');
+const gallerySelCount   = document.getElementById('gallery-selected-count');
+const galleryImportInput= document.getElementById('gallery-import-input');
+
+let galleryItems = []; // { id, url, blob, name, type:'img'|'vid', selected, timestamp }
+
+function renderGallery() {
+  const sortVal = document.getElementById('gallery-sort').value;
+  let sorted = [...galleryItems];
+  if (sortVal === 'newest')  sorted.sort((a,b) => b.timestamp - a.timestamp);
+  if (sortVal === 'oldest')  sorted.sort((a,b) => a.timestamp - b.timestamp);
+  if (sortVal === 'name')    sorted.sort((a,b) => a.name.localeCompare(b.name));
+
+  galleryCount.textContent = `${galleryItems.length}개 이미지`;
+  updateGallerySelCount();
+
+  if (sorted.length === 0) {
+    galleryGrid.innerHTML = `<div class="gallery-empty">
+      <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#555" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+      <p>이미지가 없습니다.<br>"전체 스캔" 또는 "이미지 가져오기"로 시작하세요.</p>
+    </div>`;
+    return;
+  }
+
+  galleryGrid.innerHTML = '';
+  sorted.forEach(item => {
+    const div = document.createElement('div');
+    div.className = 'gallery-item' + (item.selected ? ' selected' : '');
+    div.dataset.id = item.id;
+
+    const isVid = item.type === 'vid';
+    const media = isVid ? document.createElement('video') : document.createElement('img');
+    media.src = item.url;
+    if (isVid) { media.muted = true; media.loop = true; }
+    div.appendChild(media);
+
+    const badge = document.createElement('span');
+    badge.className = 'gallery-type-badge ' + (isVid ? 'vid' : 'img');
+    badge.textContent = isVid ? 'VID' : 'IMG';
+    div.appendChild(badge);
+
+    const label = document.createElement('div');
+    label.className = 'gallery-label';
+    label.textContent = item.name;
+    div.appendChild(label);
+
+    div.addEventListener('click', () => {
+      item.selected = !item.selected;
+      div.classList.toggle('selected');
+      updateGallerySelCount();
+    });
+
+    if (isVid) {
+      div.addEventListener('mouseenter', () => media.play());
+      div.addEventListener('mouseleave', () => { media.pause(); media.currentTime = 0; });
+    }
+
+    galleryGrid.appendChild(div);
+  });
+}
+
+function updateGallerySelCount() {
+  const cnt = galleryItems.filter(i => i.selected).length;
+  gallerySelCount.textContent = cnt;
+}
+
+// 전체 스캔 — Flow 페이지에서 이미지/비디오 URL 수집
+document.getElementById('btn-scan-all').addEventListener('click', async () => {
+  addLog('🔍 갤러리: Flow 페이지 스캔 시작...', 'info');
+  try {
+    const galleryResolution = document.getElementById('gallery-resolution').value || '1k';
+    const res = await chrome.runtime.sendMessage({ type: 'SCAN_GALLERY', resolution: galleryResolution });
+    if (!res || !res.urls || res.urls.length === 0) {
+      addLog('스캔 결과 없음 — Flow 프로젝트에서 이미지를 먼저 생성하세요.', 'warning');
+      return;
+    }
+    let added = 0;
+    for (const u of res.urls) {
+      if (galleryItems.find(g => g.url === u.url)) continue;
+      galleryItems.push({
+        id: crypto.randomUUID(),
+        url: u.url,
+        blob: null,
+        name: u.name || `scan_${galleryItems.length + 1}`,
+        type: u.type || 'img',
+        selected: false,
+        timestamp: Date.now()
+      });
+      added++;
+    }
+    addLog(`✅ 갤러리: ${added}개 스캔 완료 (총 ${galleryItems.length}개)`, 'success');
+    renderGallery();
+  } catch (e) {
+    addLog(`스캔 실패: ${e.message}`, 'error');
+  }
+});
+
+// 이미지 가져오기
+document.getElementById('btn-import-images').addEventListener('click', () => {
+  galleryImportInput.click();
+});
+galleryImportInput.addEventListener('change', (e) => {
+  const files = Array.from(e.target.files);
+  if (!files.length) return;
+  let added = 0;
+  files.forEach(file => {
+    const url = URL.createObjectURL(file);
+    const isVid = file.type.startsWith('video/');
+    galleryItems.push({
+      id: crypto.randomUUID(),
+      url,
+      blob: file,
+      name: file.name,
+      type: isVid ? 'vid' : 'img',
+      selected: false,
+      timestamp: Date.now()
+    });
+    added++;
+  });
+  addLog(`📥 갤러리: ${added}개 이미지 가져옴 (총 ${galleryItems.length}개)`, 'success');
+  renderGallery();
+  galleryImportInput.value = '';
+});
+
+// 정렬 변경
+document.getElementById('gallery-sort').addEventListener('change', renderGallery);
+
+// 랜덤 선택
+document.getElementById('btn-random-pick').addEventListener('click', () => {
+  galleryItems.forEach(i => i.selected = false);
+  const count = Math.min(10, galleryItems.length);
+  const shuffled = [...galleryItems].sort(() => Math.random() - 0.5);
+  shuffled.slice(0, count).forEach(i => i.selected = true);
+  renderGallery();
+});
+
+// 매칭 선택 — 프롬프트와 이름 매칭
+document.getElementById('btn-pick-matched').addEventListener('click', () => {
+  const raw = document.getElementById('prompt-input').value.trim();
+  if (!raw) { addLog('매칭 선택: 프롬프트를 먼저 입력하세요.', 'warning'); return; }
+  const prompts = raw.split(/\n\s*\n/).map(p => p.trim()).filter(Boolean);
+  galleryItems.forEach(item => {
+    item.selected = prompts.some(p => {
+      const firstWord = p.split(/[\s,]+/)[0].toLowerCase();
+      return item.name.toLowerCase().includes(firstWord);
+    });
+  });
+  const cnt = galleryItems.filter(i => i.selected).length;
+  addLog(`🔗 매칭 선택: ${cnt}개 매칭됨`, 'info');
+  renderGallery();
+});
+
+// 전체 선택
+document.getElementById('btn-select-all').addEventListener('click', () => {
+  galleryItems.forEach(i => i.selected = true);
+  renderGallery();
+});
+
+// 선택 해제
+document.getElementById('btn-deselect-all').addEventListener('click', () => {
+  galleryItems.forEach(i => i.selected = false);
+  renderGallery();
+});
+
+// 다운로드
+document.getElementById('btn-gallery-download').addEventListener('click', async () => {
+  const selected = galleryItems.filter(i => i.selected);
+  if (!selected.length) { addLog('다운로드: 이미지를 선택하세요.', 'warning'); return; }
+  addLog(`💾 갤러리: ${selected.length}개 다운로드 시작...`, 'info');
+  for (const item of selected) {
+    try {
+      if (dirHandle) {
+        const resp = await fetch(item.url);
+        const blob = await resp.blob();
+        const fh   = await dirHandle.getFileHandle(item.name, { create: true });
+        const wr   = await fh.createWritable();
+        await wr.write(blob);
+        await wr.close();
+      } else {
+        const a = document.createElement('a');
+        a.href = item.url;
+        a.download = item.name;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      }
+    } catch (e) {
+      addLog(`다운로드 실패: ${item.name} — ${e.message}`, 'error');
+    }
+  }
+  addLog(`✅ 갤러리: ${selected.length}개 다운로드 완료`, 'success');
+});
+
+// 영상 변환 — 선택된 이미지를 i2v 배치로 전달
+document.getElementById('btn-animate-images').addEventListener('click', () => {
+  const selected = galleryItems.filter(i => i.selected && i.type === 'img');
+  if (!selected.length) { addLog('영상 변환: 이미지를 선택하세요.', 'warning'); return; }
+  // i2v 모드로 전환
+  document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+  const i2vBtn = document.querySelector('.mode-btn[data-mode="i2v"]');
+  if (i2vBtn) i2vBtn.classList.add('active');
+  currentMode = 'i2v';
+  // 선택된 이미지 URL을 프롬프트에 메타데이터로 저장
+  window._galleryAnimateImages = selected.map(i => ({ url: i.url, name: i.name, blob: i.blob }));
+  // 제어 탭으로 전환 + 액션바 표시
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelector('.tab-btn[data-tab="control"]').classList.add('active');
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  document.getElementById('tab-control').classList.add('active');
+  document.getElementById('action-bar').style.display = 'flex';
+  addLog(`🎬 갤러리: ${selected.length}개 이미지를 영상 변환 대기열에 추가. 프롬프트를 입력하고 실행하세요.`, 'info');
 });
 
 // ─────────────────────────────────────────────

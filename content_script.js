@@ -313,12 +313,21 @@ async function waitForGenerationStart(btn, timeoutMs = 8000) {
 // 과부하 감지
 // ─────────────────────────────────────────────
 function detectOverload() {
-  for (const el of document.querySelectorAll('[class*="error"],[class*="alert"],[role="alert"]')) {
+  for (const el of document.querySelectorAll('[class*="error"],[class*="alert"],[role="alert"],h3,p,span,div')) {
     const t = (el.textContent || '').toLowerCase();
     if (t.includes('overload') || t.includes('queue full') ||
         t.includes('과부하')   || t.includes('try again')  ||
-        t.includes('다시 시도')) return true;
+        t.includes('다시 시도') || t.includes('unusual activity') ||
+        t.includes('비정상')   || t.includes('help center')) return true;
   }
+  // "실패" 타일 카드 감지
+  const failTiles = document.querySelectorAll('[data-tile-id]');
+  let failCount = 0;
+  for (const tile of failTiles) {
+    const txt = (tile.textContent || '').toLowerCase();
+    if (txt.includes('실패') || txt.includes('failed') || txt.includes('unusual')) failCount++;
+  }
+  if (failCount >= 2) return true; // 연속 실패 2개 이상이면 과부하로 간주
   return false;
 }
 
@@ -361,7 +370,10 @@ async function runOnePrompt(payload, index, total) {
     autoRename = true,
   } = payload;
 
-  sendLog(`▶ [${index+1}/${total}] 프롬프트 시작: "${prompt.slice(0,50)}..."`, 'info');
+  const characterImgs = payload.characterImages || [];
+  const isI2I = payload.mode === 'i2i' && characterImgs.length > 0;
+
+  sendLog(`▶ [${index+1}/${total}] 프롬프트 시작: "${prompt.slice(0,50)}..." ${isI2I ? `(i2i: ${characterImgs.length}개 이미지)` : ''}`, 'info');
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     if (stopRequested) return false;
@@ -388,6 +400,25 @@ async function runOnePrompt(payload, index, total) {
     if (closeBtns.length) { sendLog(`다이얼로그 닫기: ${closeBtns.length}개`, 'info'); }
     closeBtns.forEach(b => b.click());
     await sleep(200);
+
+    // 2.5) i2i 모드: 캐릭터 이미지 업로드 (프롬프트 입력 전)
+    if (isI2I) {
+      setStatus(`[${index+1}/${total}] 캐릭터 이미지 업로드 중...`, 'running');
+      for (const img of characterImgs) {
+        sendLog(`이미지 업로드: ${img.fileName || img.name}`, 'info');
+        try {
+          const uploadRes = await chrome.runtime.sendMessage({
+            type: 'UPLOAD_IMAGE',
+            dataUrl: img.dataUrl,
+            fileName: img.fileName || `${img.name}.png`,
+          });
+          sendLog(`이미지 업로드 결과: ${JSON.stringify(uploadRes)}`, uploadRes?.ok ? 'success' : 'error');
+          await sleep(1500); // Flow가 이미지 처리할 시간
+        } catch (e) {
+          sendLog(`이미지 업로드 실패: ${e.message}`, 'error');
+        }
+      }
+    }
 
     // 3) 프롬프트 입력
     setStatus(`[${index+1}/${total}] 입력 중... (시도 ${attempt})`, 'running');
@@ -429,9 +460,10 @@ async function runOnePrompt(payload, index, total) {
     // 5) 과부하 체크
     await sleep(3000);
     if (detectOverload()) {
-      sendLog('❌ 과부하 감지 — 30초 대기', 'error');
-      setStatus(`[${index+1}/${total}] 과부하 — 30초 대기`, 'error');
-      await sleep(30000); continue;
+      const waitSec = 60 * attempt; // 시도마다 대기 증가: 60초, 120초, 180초...
+      sendLog(`❌ 과부하/비정상 활동 감지 — ${waitSec}초 대기 (시도 ${attempt})`, 'error');
+      setStatus(`[${index+1}/${total}] 과부하 감지 — ${waitSec}초 대기`, 'error');
+      await sleep(waitSec * 1000); continue;
     }
 
     // 6) 완료 대기
@@ -530,6 +562,47 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'STOP_BATCH') {
     stopRequested = true;
     sendResponse({ ok: true });
+    return true;
+  }
+  if (msg.type === 'SCAN_GALLERY') {
+    // Flow 페이지에서 모든 이미지/비디오 URL 수집
+    const urls = [];
+    const seen = new Set();
+    document.querySelectorAll('img[src]').forEach(img => {
+      const src = img.src;
+      if (!src || src.startsWith('data:') || seen.has(src)) return;
+      if (img.naturalWidth < 50 || img.naturalHeight < 50) return;
+      seen.add(src);
+      const name = src.split('/').pop().split('?')[0] || `image_${urls.length + 1}.png`;
+      urls.push({ url: src, name, type: 'img' });
+    });
+    // video 요소: src 속성 직접 확인
+    document.querySelectorAll('video[src]').forEach(v => {
+      const src = v.src;
+      if (!src || seen.has(src)) return;
+      seen.add(src);
+      const name = src.split('/').pop().split('?')[0] || `video_${urls.length + 1}.mp4`;
+      urls.push({ url: src, name, type: 'vid' });
+    });
+    // video > source 요소: src 속성이 없는 video의 하위 source에서 수집
+    document.querySelectorAll('video:not([src]) source[src]').forEach(s => {
+      const src = s.src;
+      if (!src || seen.has(src)) return;
+      seen.add(src);
+      const name = src.split('/').pop().split('?')[0] || `video_${urls.length + 1}.mp4`;
+      urls.push({ url: src, name, type: 'vid' });
+    });
+    // background-image 체크
+    document.querySelectorAll('[style*="background-image"]').forEach(el => {
+      const m = el.style.backgroundImage.match(/url\(["']?(.+?)["']?\)/);
+      if (!m || seen.has(m[1])) return;
+      const src = m[1];
+      if (src.startsWith('data:')) return;
+      seen.add(src);
+      urls.push({ url: src, name: `bg_${urls.length + 1}.png`, type: 'img' });
+    });
+    sendLog(`스캔 완료: ${urls.length}개 미디어 발견`);
+    sendResponse({ urls });
     return true;
   }
   if (msg.type === 'INSPECT_DOM') {
