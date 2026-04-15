@@ -420,6 +420,7 @@ function detectOverload() {
 // ─────────────────────────────────────────────
 async function triggerDownload(url, filename, folder) {
   if (!url || url === 'about:blank') return;
+  if (url.startsWith('/')) url = location.origin + url;
 
   // 1순위: blob → anchor
   if (url.startsWith('blob:')) {
