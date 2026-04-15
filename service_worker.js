@@ -112,6 +112,96 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return false;
   }
 
+  // Content Script → TYPE_AT_SYMBOL / TYPE_CHAR (MAIN world 키보드 시뮬레이션)
+  if (msg.type === 'TYPE_AT_SYMBOL' || msg.type === 'TYPE_CHAR') {
+    const tabId = sender.tab?.id;
+    if (!tabId) { sendResponse({ ok: false, error: 'no tab' }); return false; }
+    const char = msg.type === 'TYPE_AT_SYMBOL' ? '@' : msg.char;
+    chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      func: (ch) => {
+        const el = document.querySelector('div[data-slate-editor="true"]')
+                || document.querySelector('div[contenteditable="true"]');
+        if (!el) return 'NO_EDITOR';
+        el.focus();
+
+        // 키보드 이벤트 시퀀스: keydown → beforeinput → input → keyup
+        const keyOpts = { key: ch, code: ch === '@' ? 'Digit2' : 'Key' + ch.toUpperCase(), bubbles: true, cancelable: true };
+        el.dispatchEvent(new KeyboardEvent('keydown', keyOpts));
+
+        // beforeinput (Slate 트리거)
+        el.dispatchEvent(new InputEvent('beforeinput', {
+          bubbles: true, cancelable: true,
+          inputType: 'insertText', data: ch,
+        }));
+
+        // input
+        el.dispatchEvent(new InputEvent('input', {
+          bubbles: true, cancelable: false,
+          inputType: 'insertText', data: ch,
+        }));
+
+        el.dispatchEvent(new KeyboardEvent('keyup', keyOpts));
+        return 'OK';
+      },
+      args: [char]
+    }).then(results => {
+      const r = results?.[0]?.result || 'UNKNOWN';
+      sendResponse({ ok: r === 'OK', result: r });
+    }).catch(e => {
+      sendResponse({ ok: false, error: e.message });
+    });
+    return true;
+  }
+
+  // Content Script → INJECT_TEXT_BEFOREINPUT (VEO Automation 원본 방식)
+  // Ctrl+A 선택 → beforeinput insertText — Slate React 상태 정상 갱신
+  if (msg.type === 'INJECT_TEXT_BEFOREINPUT') {
+    const tabId = sender.tab?.id;
+    if (!tabId) { sendResponse({ ok: false, error: 'no tab' }); return false; }
+    chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      func: (text) => {
+        return new Promise(async (resolve) => {
+          const sleep = ms => new Promise(r => setTimeout(r, ms));
+          const el = document.querySelector('div[data-slate-editor="true"]')
+                  || document.querySelector('div[contenteditable="true"]');
+          if (!el) { resolve('NO_EDITOR'); return; }
+
+          // 1) focus + click
+          el.click();
+          el.focus();
+          await sleep(150);
+
+          // 2) 전체 선택 — Selection API (합성 이벤트는 isTrusted=false라 네이티브 동작 안 함)
+          const sel = window.getSelection();
+          if (sel) {
+            sel.selectAllChildren(el);
+          }
+          await sleep(80);
+
+          // 3) beforeinput insertText — Slate가 리스닝하는 핵심 이벤트
+          el.dispatchEvent(new InputEvent('beforeinput', {
+            bubbles: true, cancelable: true,
+            inputType: 'insertText', data: text,
+          }));
+          await sleep(100);
+
+          resolve('OK_BEFOREINPUT_V2');
+        });
+      },
+      args: [msg.text]
+    }).then(results => {
+      const r = results?.[0]?.result || 'UNKNOWN';
+      sendResponse({ ok: r.startsWith('OK'), result: r });
+    }).catch(e => {
+      sendResponse({ ok: false, error: e.message });
+    });
+    return true;
+  }
+
   // Content Script → INJECT_TEXT (MAIN world Slate 입력)
   if (msg.type === 'INJECT_TEXT') {
     const tabId = sender.tab?.id;
@@ -244,7 +334,189 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
-  // Content Script → UPLOAD_IMAGE (MAIN world에서 Flow에 이미지 업로드)
+  // Content Script → UPLOAD_IMAGE_V2 (Flow UI 에셋 피커 경유)
+  // 1) "+" 버튼 클릭 → 에셋 피커 오픈
+  // 2) "이미지 업로드" 버튼 클릭 → file input 트리거
+  // 3) DataTransfer로 파일 주입 → change 이벤트
+  // 4) 에셋 피커 닫기 → 이미지 선택 대기
+  if (msg.type === 'UPLOAD_IMAGE_V2') {
+    const tabId = sender.tab?.id;
+    if (!tabId) { sendResponse({ ok: false, error: 'no tab' }); return false; }
+    chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      func: (dataUrl, fileName) => {
+        return new Promise(async (resolve) => {
+          const sleep = ms => new Promise(r => setTimeout(r, ms));
+          try {
+            // dataURL → File 변환
+            const resp = await fetch(dataUrl);
+            const blob = await resp.blob();
+            const file = new File([blob], fileName, { type: blob.type || 'image/png' });
+
+            // 유틸: Shadow DOM 포함 전체 수집
+            function collectAll(root, selector) {
+              const result = [];
+              root.querySelectorAll(selector).forEach(el => result.push(el));
+              root.querySelectorAll('*').forEach(el => {
+                if (el.shadowRoot) collectAll(el.shadowRoot, selector).forEach(e => result.push(e));
+              });
+              return result;
+            }
+
+            // ── 원본 VEO Automation 셀렉터 (remote config에서 추출) ──
+            // addImageButton: button:has(i:contains("add_2"))
+            // selectUploadImageType: div[data-side="top"] button:has(i:contains("image"))
+            // sortOptionsButton: div[data-side="top"] button[aria-haspopup="menu"]:last()
+            // sortLatestOption: div[role="menu"] > button:eq(2)
+            // searchUploadedImage: div[data-side="top"] input[type="text"]
+            // virtuosoItemList: div[data-side="top"] div[data-testid="virtuoso-item-list"] > div
+            // fileInput: input[type="file"]
+
+            // jQuery :has/:contains 대응 유틸
+            function findBtnWithIcon(iconText) {
+              const btns = document.querySelectorAll('button');
+              for (const b of btns) {
+                const icon = b.querySelector('i');
+                if (icon && icon.textContent.trim() === iconText) return b;
+              }
+              return null;
+            }
+
+            // ── 1단계: "add_2" 아이콘 버튼 클릭 (에셋 피커 열기) ──
+            let addBtn = findBtnWithIcon('add_2');
+            if (!addBtn) {
+              // fallback: "add" 아이콘
+              addBtn = findBtnWithIcon('add');
+            }
+            if (!addBtn) {
+              resolve('FAIL:NO_ADD_BTN');
+              return;
+            }
+
+            addBtn.click();
+            await sleep(1200);
+
+            // ── 2단계: "image" 아이콘 버튼 (업로드 타입 선택) ──
+            const uploadTypeBtn = document.querySelector('div[data-side="top"] button');
+            if (uploadTypeBtn) {
+              // "image" 아이콘 버튼이 있으면 클릭
+              const imgBtns = document.querySelectorAll('div[data-side="top"] button');
+              for (const b of imgBtns) {
+                const icon = b.querySelector('i');
+                if (icon && icon.textContent.trim() === 'image') {
+                  b.click();
+                  await sleep(500);
+                  break;
+                }
+              }
+            }
+
+            // ── 3단계: 정렬 → 최신순 ──
+            const sortBtn = document.querySelector('div[data-side="top"] button[aria-haspopup="menu"]:last-of-type');
+            if (sortBtn) {
+              sortBtn.click();
+              await sleep(500);
+              // 세 번째 버튼 = 최신순
+              const menuBtns = document.querySelectorAll('div[role="menu"] > button');
+              if (menuBtns.length > 2) {
+                menuBtns[2].click();
+                await sleep(500);
+              }
+            }
+
+            // ── 4단계: 검색 필드에 파일명 입력 ──
+            const searchInput = document.querySelector('div[data-side="top"] input[type="text"]');
+            if (searchInput) {
+              const searchName = fileName.replace(/\.[^.]+$/, '');
+              searchInput.focus();
+              searchInput.click();
+              await sleep(200);
+              const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+              if (nativeSetter) nativeSetter.call(searchInput, searchName);
+              else searchInput.value = searchName;
+              searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+              await sleep(1500);
+
+              // 검색 결과에서 이미지 선택
+              const items = document.querySelectorAll('div[data-side="top"] div[data-testid="virtuoso-item-list"] > div');
+              if (items.length > 0) {
+                const img = items[0].querySelector('img');
+                if (img) { img.click(); await sleep(500); resolve('OK_SEARCH_SELECT'); return; }
+                items[0].click(); await sleep(500); resolve('OK_SEARCH_SELECT'); return;
+              }
+            }
+
+            // ── 5단계: 검색 실패 시 → 파일 직접 업로드 ──
+            // fileInput 찾기
+            let fileInput = document.querySelector('input[type="file"]');
+            if (!fileInput) {
+              // "이미지 업로드" 텍스트 버튼 클릭하여 file input 트리거
+              const allEls = document.querySelectorAll('div[data-side="top"] *');
+              for (const el of allEls) {
+                const t = (el.textContent || '').trim();
+                if (t === '이미지 업로드' || t === 'Image upload' || t === 'Upload image') {
+                  el.click();
+                  await sleep(800);
+                  fileInput = document.querySelector('input[type="file"]');
+                  break;
+                }
+              }
+            }
+
+            if (fileInput) {
+              const dt = new DataTransfer();
+              dt.items.add(file);
+              fileInput.files = dt.files;
+              fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+
+              // 업로드 완료 대기 (최대 30초)
+              for (let check = 0; check < 60; check++) {
+                await sleep(500);
+                // 페이지 내 %가 포함된 텍스트 확인
+                const allText = document.body.innerText || '';
+                if (allText.includes('100%') || (!allText.match(/\d+%/) && check > 10)) break;
+              }
+              await sleep(1500);
+
+              // 업로드 후 에셋 검색하여 선택
+              if (searchInput) {
+                const searchName = fileName.replace(/\.[^.]+$/, '');
+                const ns = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+                if (ns) ns.call(searchInput, searchName);
+                else searchInput.value = searchName;
+                searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+                await sleep(1500);
+
+                const items2 = document.querySelectorAll('div[data-side="top"] div[data-testid="virtuoso-item-list"] > div');
+                if (items2.length > 0) {
+                  const img2 = items2[0].querySelector('img');
+                  if (img2) img2.click();
+                  else items2[0].click();
+                  await sleep(500);
+                }
+              }
+
+              resolve('OK_UPLOAD_FILE');
+            } else {
+              resolve('FAIL:NO_FILE_INPUT');
+            }
+          } catch (e) {
+            resolve('FAIL:' + e.message);
+          }
+        });
+      },
+      args: [msg.dataUrl, msg.fileName]
+    }).then(results => {
+      const r = results?.[0]?.result || 'UNKNOWN';
+      sendResponse({ ok: r.startsWith('OK'), result: r });
+    }).catch(e => {
+      sendResponse({ ok: false, error: e.message });
+    });
+    return true;
+  }
+
+  // Content Script → UPLOAD_IMAGE (MAIN world에서 Flow에 이미지 업로드 — 기존 V1)
   if (msg.type === 'UPLOAD_IMAGE') {
     const tabId = sender.tab?.id;
     if (!tabId) { sendResponse({ ok: false, error: 'no tab' }); return false; }

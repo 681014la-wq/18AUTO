@@ -86,12 +86,91 @@ function findInputEl() {
 }
 
 // ─────────────────────────────────────────────
-// 프롬프트 입력 — execCommand (Slate React 상태 갱신)
+// @에셋 참조 삽입 (Flow 드롭다운 자동 선택)
+// ─────────────────────────────────────────────
+async function insertAssetReference(el, assetName) {
+  sendLog(`@에셋 삽입 시도: ${assetName}`, 'info');
+  el.click();
+  el.focus();
+  await sleep(300);
+
+  // 1) '@' 키보드 이벤트로 입력 → 드롭다운 트리거
+  // MAIN world에서 실행 (Slate 내부 이벤트 리스너 트리거 필요)
+  try {
+    const atRes = await chrome.runtime.sendMessage({ type: 'TYPE_AT_SYMBOL' });
+    sendLog(`@ 입력: ${JSON.stringify(atRes)}`, atRes?.ok ? 'success' : 'error');
+  } catch (e) {
+    // fallback
+    document.execCommand('insertText', false, '@');
+  }
+  await sleep(1000);
+
+  // 2) 에셋 이름 한 글자씩 타이핑 → 필터
+  for (const ch of assetName) {
+    try {
+      await chrome.runtime.sendMessage({ type: 'TYPE_CHAR', char: ch });
+    } catch (e) {
+      document.execCommand('insertText', false, ch);
+    }
+    await sleep(150);
+  }
+  await sleep(1000);
+
+  // 3) 드롭다운에서 매칭 항목 찾기 + 클릭
+  let found = false;
+  for (let retry = 0; retry < 5; retry++) {
+    // Flow 드롭다운 옵션 탐색 (listbox, menu, popover 등)
+    const options = document.querySelectorAll(
+      '[role="option"], [role="menuitem"], [role="listbox"] [data-value], ' +
+      '[class*="mention"] [class*="item"], [class*="dropdown"] [class*="item"], ' +
+      '[class*="autocomplete"] [class*="item"], [class*="suggestion"], ' +
+      '[class*="popover"] button, [class*="popover"] [role="option"]'
+    );
+
+    for (const opt of options) {
+      const text = (opt.textContent || '').trim();
+      if (text.includes(assetName) || text.toLowerCase().includes(assetName.toLowerCase())) {
+        opt.click();
+        sendLog(`@에셋 선택 성공: "${text}"`, 'success');
+        found = true;
+        break;
+      }
+    }
+    if (found) break;
+
+    // 아직 드롭다운 안 나왔으면 대기
+    await sleep(500);
+  }
+
+  if (!found) {
+    // fallback: Enter 키로 첫 번째 항목 선택 시도
+    sendLog('드롭다운 항목 못 찾음 — Enter 시도', 'warning');
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
+    await sleep(300);
+    el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', keyCode: 13, bubbles: true }));
+    await sleep(500);
+
+    // 그래도 안 되면 @텍스트 지우고 포기
+    const currentText = (el.innerText || '').trim();
+    if (currentText.includes('@' + assetName)) {
+      sendLog('@에셋 참조 실패 — 텍스트로 남음', 'error');
+    }
+  }
+
+  await sleep(500);
+  // 에셋 뒤에 공백 추가
+  document.execCommand('insertText', false, ' ');
+  await sleep(200);
+}
+
+// ─────────────────────────────────────────────
+// 프롬프트 입력 — beforeinput (VEO Automation 원본 방식)
 // ─────────────────────────────────────────────
 async function setPromptText(el, text) {
   el.click();
   el.focus();
   await sleep(300);
+
   if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
     const nativeSetter = Object.getOwnPropertyDescriptor(
       window.HTMLTextAreaElement.prototype, 'value'
@@ -103,22 +182,36 @@ async function setPromptText(el, text) {
     }
     el.dispatchEvent(new Event('input', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
-  } else {
-    // MAIN world에서 Slate 입력 (ISOLATED world에서는 Slate 상태 갱신 불가)
-    try {
-      const res = await chrome.runtime.sendMessage({ type: 'INJECT_TEXT', text });
-      sendLog(`MAIN world 입력: ${JSON.stringify(res)}`, res?.ok ? 'success' : 'error');
-      if (res?.ok) { await sleep(1200); return; }
-    } catch (e) {
-      sendLog(`MAIN world 실패: ${e.message}`, 'error');
-    }
-    // fallback
-    document.execCommand('selectAll', false, null);
-    await sleep(80);
-    document.execCommand('delete', false, null);
-    await sleep(80);
-    document.execCommand('insertText', false, text);
+    await sleep(800);
+    return;
   }
+
+  // 1순위: beforeinput 방식 (VEO Automation 원본과 동일)
+  // Ctrl+A → beforeinput insertText — Slate가 React 상태를 정상 갱신
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'INJECT_TEXT_BEFOREINPUT', text });
+    sendLog(`beforeinput 입력: ${JSON.stringify(res)}`, res?.ok ? 'success' : 'error');
+    if (res?.ok) { await sleep(1200); return; }
+  } catch (e) {
+    sendLog(`beforeinput 실패: ${e.message}`, 'error');
+  }
+
+  // 2순위: MAIN world execCommand
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'INJECT_TEXT', text });
+    sendLog(`MAIN world 입력: ${JSON.stringify(res)}`, res?.ok ? 'success' : 'error');
+    if (res?.ok) { await sleep(1200); return; }
+  } catch (e) {
+    sendLog(`MAIN world 실패: ${e.message}`, 'error');
+  }
+
+  // 3순위: execCommand fallback
+  sendLog('fallback — execCommand', 'warning');
+  document.execCommand('selectAll', false, null);
+  await sleep(100);
+  document.execCommand('delete', false, null);
+  await sleep(100);
+  document.execCommand('insertText', false, text);
   await sleep(800);
 }
 
@@ -313,21 +406,12 @@ async function waitForGenerationStart(btn, timeoutMs = 8000) {
 // 과부하 감지
 // ─────────────────────────────────────────────
 function detectOverload() {
-  for (const el of document.querySelectorAll('[class*="error"],[class*="alert"],[role="alert"],h3,p,span,div')) {
+  for (const el of document.querySelectorAll('[class*="error"],[class*="alert"],[role="alert"]')) {
     const t = (el.textContent || '').toLowerCase();
     if (t.includes('overload') || t.includes('queue full') ||
-        t.includes('과부하')   || t.includes('try again')  ||
-        t.includes('다시 시도') || t.includes('unusual activity') ||
-        t.includes('비정상')   || t.includes('help center')) return true;
+        t.includes('과부하')   || t.includes('unusual activity') ||
+        t.includes('비정상')) return true;
   }
-  // "실패" 타일 카드 감지
-  const failTiles = document.querySelectorAll('[data-tile-id]');
-  let failCount = 0;
-  for (const tile of failTiles) {
-    const txt = (tile.textContent || '').toLowerCase();
-    if (txt.includes('실패') || txt.includes('failed') || txt.includes('unusual')) failCount++;
-  }
-  if (failCount >= 2) return true; // 연속 실패 2개 이상이면 과부하로 간주
   return false;
 }
 
@@ -371,9 +455,9 @@ async function runOnePrompt(payload, index, total) {
   } = payload;
 
   const characterImgs = payload.characterImages || [];
-  const isI2I = payload.mode === 'i2i' && characterImgs.length > 0;
+  const hasRefImages = characterImgs.length > 0;
 
-  sendLog(`▶ [${index+1}/${total}] 프롬프트 시작: "${prompt.slice(0,50)}..." ${isI2I ? `(i2i: ${characterImgs.length}개 이미지)` : ''}`, 'info');
+  sendLog(`▶ [${index+1}/${total}] 프롬프트 시작: "${prompt.slice(0,50)}..." ${hasRefImages ? `(레퍼런스: ${characterImgs.length}개)` : ''}`, 'info');
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     if (stopRequested) return false;
@@ -401,32 +485,53 @@ async function runOnePrompt(payload, index, total) {
     closeBtns.forEach(b => b.click());
     await sleep(200);
 
-    // 2.5) i2i 모드: 캐릭터 이미지 업로드 (프롬프트 입력 전)
-    if (isI2I) {
+    // 2.5) 레퍼런스 이미지 업로드 (텍스트 입력 전! — 원본 VEO Automation 순서)
+    // 이미지를 먼저 올려야 Slate 텍스트 입력이 깨지지 않음
+    if (hasRefImages && ['i2i', 'c2v', 'i2v'].includes(payload.mode)) {
       setStatus(`[${index+1}/${total}] 캐릭터 이미지 업로드 중...`, 'running');
       for (const img of characterImgs) {
         sendLog(`이미지 업로드: ${img.fileName || img.name}`, 'info');
         try {
           const uploadRes = await chrome.runtime.sendMessage({
-            type: 'UPLOAD_IMAGE',
+            type: 'UPLOAD_IMAGE_V2',
             dataUrl: img.dataUrl,
             fileName: img.fileName || `${img.name}.png`,
           });
           sendLog(`이미지 업로드 결과: ${JSON.stringify(uploadRes)}`, uploadRes?.ok ? 'success' : 'error');
-          await sleep(1500); // Flow가 이미지 처리할 시간
+          if (!uploadRes?.ok) {
+            sendLog('V2 실패 — V1 fallback', 'warning');
+            const v1Res = await chrome.runtime.sendMessage({
+              type: 'UPLOAD_IMAGE',
+              dataUrl: img.dataUrl,
+              fileName: img.fileName || `${img.name}.png`,
+            });
+            sendLog(`V1 결과: ${JSON.stringify(v1Res)}`, v1Res?.ok ? 'success' : 'error');
+          }
+          await sleep(2000); // 이미지 처리 완료 대기
         } catch (e) {
           sendLog(`이미지 업로드 실패: ${e.message}`, 'error');
         }
       }
+      // 이미지 업로드 후 안정화 대기
+      await sleep(1500);
     }
 
-    // 3) 프롬프트 입력
+    // 3) 프롬프트 입력 (이미지 업로드 완료 후)
     setStatus(`[${index+1}/${total}] 입력 중... (시도 ${attempt})`, 'running');
     sendLog(`프롬프트 입력 시작 (${prompt.length}자)`, 'info');
+
+    // 이미지 업로드 후 입력창 재탐색 (DOM 변경 가능)
+    if (hasRefImages && ['i2i', 'c2v', 'i2v'].includes(payload.mode)) {
+      inputEl = findInputEl();
+      if (!inputEl) {
+        sendLog('이미지 업로드 후 입력창 재탐색 실패', 'error');
+        await sleep(2000); continue;
+      }
+    }
+
     await setPromptText(inputEl, prompt);
 
-    // Slate: MAIN world OK 시 placeholder 잔존해도 Slate 내부 상태는 갱신됨 (React re-render 지연)
-    // → placeholder 체크 2초간 재시도
+    // Slate: placeholder 체크 2초간 재시도
     let typed = '';
     for (let c = 0; c < 5; c++) {
       const slateEmpty = !!inputEl.querySelector?.('[data-slate-placeholder]');
@@ -475,6 +580,8 @@ async function runOnePrompt(payload, index, total) {
     result.urls.forEach((item, i) => sendLog(`  URL[${i}] type=${item.type} url=${item.url.slice(0,80)}`, 'info'));
 
     if (result.ok) {
+      setStatus(`[${index+1}/${total}] 다운로드 대기 중...`, 'running');
+      await sleep(3000); // 이미지 렌더링 완료 대기
       setStatus(`[${index+1}/${total}] 다운로드 중... (${result.urls.length}개)`, 'running');
       const ts = Date.now();
       result.urls.forEach(({ url, type }, i) => {

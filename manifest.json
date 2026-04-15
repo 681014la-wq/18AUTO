@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "JooN VEO Automation",
-  "version": "2.6.8",
+  "version": "2.7.0",
   "description": "Google Flow에서 동영상 및 이미지를 일괄 생성합니다.",
   "permissions": [
     "tabs",
@@ -13,6 +13,12 @@
   ],
   "host_permissions": [
     "https://labs.google/*"
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["characters/*"],
+      "matches": ["https://labs.google/*"]
+    }
   ],
   "background": {
     "service_worker": "service_worker.js"

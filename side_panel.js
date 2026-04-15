@@ -1,4 +1,4 @@
-// side_panel.js — VEO Automation v2.6.8
+// side_panel.js — VEO Automation v2.7.0
 
 // ─────────────────────────────────────────────
 // Flow 탭 감지 + 오버레이
@@ -47,16 +47,107 @@ let currentMode = 't2i';
 // ─── 캐릭터 이미지 저장 (i2i 모드) ───
 const characterImages = []; // { name, dataUrl, file }
 
-document.querySelectorAll('.mode-btn').forEach(btn => {
+document.querySelectorAll('.mode-tab').forEach(btn => {
   btn.addEventListener('click', () => {
-    document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.mode-tab').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     currentMode = btn.dataset.mode;
     // i2i 모드일 때만 이미지 업로드 섹션 표시
     const i2iSection = document.getElementById('i2i-section');
-    if (i2iSection) i2iSection.style.display = currentMode === 'i2i' ? 'block' : 'none';
+    if (i2iSection) i2iSection.style.display = (currentMode === 'i2i' || currentMode === 'i2v') ? 'block' : 'none';
     updateQueue(parsePrompts(document.getElementById('prompt-input').value));
   });
+});
+
+// ─── 캐릭터 프리셋 ───
+const CHARACTER_PRESETS = {
+  '경제한방': {
+    images: [
+      'characters/경제한방/경제한방_face.png',
+      'characters/경제한방/경제한방_body.png',
+      'characters/경제한방/경제한방_sheet.png',
+    ],
+    style: 'The "경제한방" mascot character: round white head, single tuft of hair on top, round glasses, black bow tie, white oval body with black outline, black stick limbs, slightly chubby belly. Cinematic 16:9 2D cartoon animation with thick clean black outlines and bold saturated colors. Dramatic mood lighting with strong atmosphere — deep shadows, glowing neon highlights, volumetric light rays. Detailed Korean urban/city backgrounds (Seoul skyline, streets, buildings). Bold Korean text overlays as 3D or glowing signage. Premium editorial YouTube thumbnail energy. High visual contrast, painterly background detail, expressive character poses.',
+  },
+  '한국경제': {
+    images: [
+      'characters/한국경제/한국경제_face.png',
+      'characters/한국경제/한국경제_body.png',
+      'characters/한국경제/한국경제_sheet.png',
+    ],
+    style: 'The "한국경제" character: young Korean male in dark navy suit with navy tie, rectangular black glasses, neat short black hair parted to the side, clean-shaven. 3D Pixar-style cartoon rendering with slightly exaggerated proportions (large head ratio). Cinematic 16:9 composition with dramatic lighting, Seoul cityscape backgrounds with Namsan Tower, bold 3D Korean text overlays, financial/economic data visualization elements (charts, arrows, coins, globes). Premium YouTube thumbnail energy with deep navy and warm golden tones. High contrast editorial news style.',
+  },
+};
+
+let activePreset = null;
+
+document.querySelectorAll('.preset-btn').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const charName = btn.dataset.char;
+    const preset = CHARACTER_PRESETS[charName];
+    if (!preset) return;
+
+    // 토글: 이미 선택된 걸 다시 누르면 해제
+    if (activePreset === charName) {
+      activePreset = null;
+      btn.classList.remove('active');
+      document.getElementById('preset-active-bar').style.display = 'none';
+      document.getElementById('preset-style-row').style.display = 'none';
+      characterImages.length = 0;
+      renderImagePreviews();
+      addLog(`캐릭터 해제: ${charName}`, 'info');
+      return;
+    }
+
+    // 활성화 + 자동 i2i 모드 전환
+    document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    activePreset = charName;
+    currentMode = 'i2i';
+    document.querySelectorAll('.mode-tab').forEach(b => b.classList.remove('active'));
+    const i2iCard = document.querySelector('.mode-tab[data-mode="i2i"]');
+    if (i2iCard) i2iCard.classList.add('active');
+
+    // 프리셋 이미지를 characterImages에 로드
+    characterImages.length = 0;
+    for (const imgPath of preset.images) {
+      try {
+        const url = chrome.runtime.getURL(imgPath);
+        const resp = await fetch(url);
+        const blob = await resp.blob();
+        const reader = new FileReader();
+        const dataUrl = await new Promise((resolve) => {
+          reader.onload = (e) => resolve(e.target.result);
+          reader.readAsDataURL(blob);
+        });
+        const fileName = imgPath.split('/').pop();
+        characterImages.push({ name: fileName.replace(/\.[^.]+$/, ''), dataUrl, fileName });
+      } catch (e) {
+        addLog(`프리셋 이미지 로드 실패: ${imgPath} — ${e.message}`, 'error');
+      }
+    }
+    renderImagePreviews();
+
+    // 화풍 토글 + 상태바 표시
+    document.getElementById('preset-style-row').style.display = 'flex';
+    const bar = document.getElementById('preset-active-bar');
+    bar.style.display = 'flex';
+    document.getElementById('preset-active-name').textContent = `${charName} 활성`;
+    const thumb = document.getElementById('preset-active-thumb');
+    if (characterImages[0]) thumb.innerHTML = `<img src="${characterImages[0].dataUrl}" />`;
+
+    addLog(`캐릭터 프리셋 로드: ${charName} (${characterImages.length}장)`, 'success');
+  });
+});
+
+document.getElementById('btn-preset-clear')?.addEventListener('click', () => {
+  activePreset = null;
+  document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('preset-active-bar').style.display = 'none';
+  document.getElementById('preset-style-row').style.display = 'none';
+  characterImages.length = 0;
+  renderImagePreviews();
+  addLog('캐릭터 프리셋 해제', 'info');
 });
 
 // ─── 이미지 업로드 핸들링 ───
@@ -82,20 +173,30 @@ document.getElementById('image-input')?.addEventListener('change', (e) => {
 
 function renderImagePreviews() {
   const container = document.getElementById('image-preview-list');
-  const hint = document.getElementById('image-count-hint');
+  const refCount = document.getElementById('ref-count');
+  const refActiveBar = document.getElementById('ref-active-bar');
   if (!container) return;
   container.innerHTML = characterImages.map((img, i) =>
-    `<div class="image-preview-item" data-index="${i}">
+    `<div class="ref-img-item" data-index="${i}">
       <img src="${img.dataUrl}" alt="${img.name}" />
-      <span class="img-name">${img.name}</span>
-      <button class="img-remove" data-index="${i}" title="제거">&times;</button>
+      <button class="ref-img-remove" data-index="${i}" title="제거">&times;</button>
     </div>`
   ).join('');
-  if (hint) hint.textContent = characterImages.length
-    ? `${characterImages.length}개 이미지 업로드됨`
-    : '업로드된 이미지가 없습니다.';
+  if (refCount) refCount.textContent = `(${characterImages.length} saved)`;
+  // 활성 참조 상태바 업데이트
+  if (refActiveBar) {
+    if (characterImages.length) {
+      refActiveBar.style.display = 'flex';
+      const countEl = document.getElementById('ref-active-count');
+      if (countEl) countEl.textContent = `${characterImages.length} 참조 활성`;
+      const thumbEl = document.getElementById('ref-active-thumb');
+      if (thumbEl && characterImages[0]) thumbEl.innerHTML = `<img src="${characterImages[0].dataUrl}" />`;
+    } else {
+      refActiveBar.style.display = 'none';
+    }
+  }
   // 제거 버튼 이벤트
-  container.querySelectorAll('.img-remove').forEach(btn => {
+  container.querySelectorAll('.ref-img-remove').forEach(btn => {
     btn.addEventListener('click', (ev) => {
       ev.stopPropagation();
       const idx = parseInt(btn.dataset.index);
@@ -105,11 +206,39 @@ function renderImagePreviews() {
   });
 }
 
+// ─── 참조 라이브러리 버튼 핸들러 ───
+document.getElementById('btn-ref-clear-all')?.addEventListener('click', () => {
+  characterImages.length = 0;
+  renderImagePreviews();
+  addLog('참조 라이브러리 전체 삭제', 'info');
+});
+document.getElementById('btn-ref-remove')?.addEventListener('click', () => {
+  characterImages.length = 0;
+  renderImagePreviews();
+});
+document.getElementById('btn-ref-select-all')?.addEventListener('click', () => {
+  document.querySelectorAll('.ref-img-item').forEach(el => el.classList.add('selected'));
+});
+document.getElementById('btn-ref-deselect-all')?.addEventListener('click', () => {
+  document.querySelectorAll('.ref-img-item').forEach(el => el.classList.remove('selected'));
+});
+document.getElementById('btn-ref-delete-selected')?.addEventListener('click', () => {
+  const selectedIndices = [];
+  document.querySelectorAll('.ref-img-item.selected').forEach(el => {
+    selectedIndices.push(parseInt(el.dataset.index));
+  });
+  if (!selectedIndices.length) return;
+  for (let i = selectedIndices.length - 1; i >= 0; i--) {
+    characterImages.splice(selectedIndices[i], 1);
+  }
+  renderImagePreviews();
+  addLog(`${selectedIndices.length}개 참조 이미지 삭제`, 'info');
+});
+
 // ─── 자동 캐릭터 매칭 ───
 function matchCharacterImages(promptText) {
-  const autoMatch = document.getElementById('toggle-auto-character')?.checked;
-  const maxImages = parseInt(document.getElementById('max-images-per-prompt')?.value) || 1;
-  if (!autoMatch || !characterImages.length) return [];
+  if (!characterImages.length) return [];
+  const maxImages = 1;
 
   const matched = [];
   const promptLower = promptText.toLowerCase();
@@ -152,28 +281,100 @@ document.getElementById('txt-input').addEventListener('change', (e) => {
 // 프롬프트 파싱
 // ─────────────────────────────────────────────
 function parsePrompts(raw) {
-  return raw.split(/\n{2,}/).map(s => s.trim()).filter(Boolean);
+  // 파이프 포맷 우선: 줄 시작이 "캐릭터명|" 또는 "|"이면 새 프롬프트로 분리
+  // 빈 줄 없어도 파이프 기준으로 자동 분리
+  const lines = raw.split('\n');
+  const results = [];
+  let current = null;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      // 빈 줄 = 프롬프트 구분 (기존 방식도 지원)
+      if (current) { results.push(current); current = null; }
+      continue;
+    }
+
+    const pipeIdx = trimmed.indexOf('|');
+    // 파이프가 있고, 파이프 앞이 캐릭터명(짧은 텍스트)이거나 비어있으면 새 프롬프트
+    if (pipeIdx >= 0 && pipeIdx <= 20) {
+      if (current) results.push(current);
+      const charName = trimmed.slice(0, pipeIdx).trim();
+      const prompt = trimmed.slice(pipeIdx + 1).trim();
+      current = { charName, prompt };
+    } else if (!current) {
+      // 파이프 없고 현재 프롬프트 없으면 새 프롬프트 시작
+      current = { charName: '', prompt: trimmed };
+    } else {
+      // 현재 프롬프트에 줄 이어붙이기
+      current.prompt += ' ' + trimmed;
+    }
+  }
+  if (current) results.push(current);
+
+  return results.filter(item => item.prompt.length > 0);
 }
 
 // ─────────────────────────────────────────────
-// 대기열 UI
+// 대기열 UI — 캐릭터 참조 매핑
 // ─────────────────────────────────────────────
+let promptRefMap = []; // { prompt, hasRef: boolean } — 프롬프트별 참조 매핑 상태
+
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
 function updateQueue(prompts) {
   const countEl = document.getElementById('queue-count');
   const listEl  = document.getElementById('queue-list');
-  countEl.textContent = `${prompts.length}개 활성`;
-  if (!prompts.length) { listEl.innerHTML = ''; return; }
-  listEl.innerHTML = prompts.map((p, i) =>
+  const section = document.getElementById('queue-section');
+
+  // 프롬프트별 참조 매핑 갱신 (파이프 포맷 기반)
+  promptRefMap = prompts.map(item => {
+    const hasRef = item.charName.length > 0;
+    return { charName: item.charName, prompt: item.prompt, hasRef };
+  });
+
+  const refCount = promptRefMap.filter(r => r.hasRef).length;
+  countEl.textContent = `${prompts.length}개 프롬프트 · ${refCount}개 참조 매핑`;
+  if (section) section.style.display = prompts.length ? '' : 'none';
+  if (!prompts.length) { listEl.innerHTML = ''; promptRefMap = []; return; }
+
+  listEl.innerHTML = promptRefMap.map((item, i) =>
     `<div class="queue-item">
-      <span class="q-num">${i + 1}.</span>
-      <span>${p.slice(0, 65)}${p.length > 65 ? '...' : ''}</span>
+      <input type="checkbox" class="q-ref-check" data-index="${i}" ${item.hasRef ? 'checked' : ''} />
+      <span class="q-num">${i + 1}</span>
+      <span class="q-text">${esc(item.prompt.slice(0, 55))}${item.prompt.length > 55 ? '...' : ''}</span>
+      <span class="q-badge ${item.hasRef ? 'q-mapped' : 'q-unmapped'}">${item.hasRef ? item.charName : '미매핑'}</span>
     </div>`
   ).join('');
+
+  // 체크박스 이벤트
+  listEl.querySelectorAll('.q-ref-check').forEach(cb => {
+    cb.addEventListener('change', (e) => {
+      const idx = parseInt(e.target.dataset.index);
+      promptRefMap[idx].hasRef = e.target.checked;
+      const badge = e.target.closest('.queue-item').querySelector('.q-badge');
+      badge.className = 'q-badge ' + (e.target.checked ? 'q-mapped' : 'q-unmapped');
+      badge.textContent = e.target.checked ? '매핑' : '미매핑';
+      const rc = promptRefMap.filter(r => r.hasRef).length;
+      countEl.textContent = `${promptRefMap.length}개 프롬프트 · ${rc}개 참조 매핑`;
+    });
+  });
 }
 
-document.getElementById('prompt-input').addEventListener('input', (e) => {
-  updateQueue(parsePrompts(e.target.value));
-});
+function refreshQueue() {
+  const raw = document.getElementById('prompt-input').value;
+  updateQueue(parsePrompts(raw));
+}
+document.getElementById('prompt-input').addEventListener('input', refreshQueue);
+document.getElementById('prompt-input').addEventListener('paste', () => setTimeout(refreshQueue, 100));
+document.getElementById('prompt-input').addEventListener('change', refreshQueue);
+
+// 벌크 모드 토글 — 파싱 방식 전환 시 대기열 갱신
+document.getElementById('toggle-bulk-mode')?.addEventListener('change', refreshQueue);
 
 // ─────────────────────────────────────────────
 // 상태 + 진행바
@@ -210,7 +411,7 @@ function resetRunUI() {
   const stopBtn = document.getElementById('btn-stop');
   runBtn.disabled     = false;
   runBtn.textContent  = '';
-  runBtn.innerHTML    = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> 실행';
+  runBtn.innerHTML    = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> 대기열 시작';
   runBtn.style.display  = '';
   stopBtn.style.display = 'none';
   hideProgress();
@@ -232,21 +433,29 @@ function showRunningUI() {
 document.getElementById('btn-run').addEventListener('click', async () => {
   const raw = document.getElementById('prompt-input').value.trim();
   if (!raw) { setStatus('프롬프트를 입력하세요', 'error'); return; }
-  const prompts = parsePrompts(raw);
-  if (!prompts.length) { setStatus('유효한 프롬프트 없음', 'error'); return; }
+  // promptRefMap 최신화
+  refreshQueue();
+  if (!promptRefMap.length) { setStatus('유효한 프롬프트 없음', 'error'); return; }
 
-  const outputCount = parseInt(document.getElementById('output-count').value) || 2;
+  const outputCount = parseInt(document.getElementById('output-count').value) || 1;
   const folderName  = document.getElementById('folder-name').value.trim() || 'veo-folder-1';
-  const delayMin    = parseInt(document.getElementById('delay-min').value) || 20;
-  const delayMax    = parseInt(document.getElementById('delay-max').value) || 30;
+  const delayMin    = parseInt(document.getElementById('delay-min').value) || 5;
+  const delayMax    = parseInt(document.getElementById('delay-max').value) || 10;
   const maxRetries  = parseInt(document.getElementById('s-retries').value) || 5;
   const dlVideo     = document.getElementById('s-dl-video').value || '720p';
   const dlImage     = document.getElementById('s-dl-image').value || '1k';
   const autoRename  = document.getElementById('toggle-autoname').checked;
 
-  const payloads = prompts.map((p, i) => {
+  const payloads = promptRefMap.map((item, i) => {
+    let finalPrompt = item.prompt;
+    // 화풍 토글 ON이면 프리셋 style 삽입
+    const styleOn = document.getElementById('toggle-preset-style')?.checked;
+    const presetName = item.charName || activePreset;
+    if (styleOn && presetName && CHARACTER_PRESETS[presetName]?.style) {
+      finalPrompt = CHARACTER_PRESETS[presetName].style + '\n' + finalPrompt;
+    }
     const payload = {
-      prompt: p,
+      prompt: finalPrompt,
       mode: currentMode,
       outputCount,
       folderName,
@@ -256,10 +465,10 @@ document.getElementById('btn-run').addEventListener('click', async () => {
       downloadImageQuality: dlImage,
       autoRename,
     };
-    // i2i 모드: 프롬프트별 매칭된 캐릭터 이미지 첨부
-    if (currentMode === 'i2i' && characterImages.length) {
-      const matched = matchCharacterImages(p);
-      payload.characterImages = matched.map(m => ({ name: m.name, dataUrl: m.dataUrl, fileName: m.fileName }));
+    // 캐릭터 참조 — 파이프 매핑 또는 프리셋 활성화 시 이미지 첨부
+    const shouldAttachRef = (item.hasRef && item.charName) || activePreset;
+    if (shouldAttachRef && characterImages.length) {
+      payload.characterImages = characterImages.map(m => ({ name: m.name, dataUrl: m.dataUrl, fileName: m.fileName }));
     }
     // 갤러리 영상 변환: _galleryAnimateImages가 있으면 각 페이로드에 이미지 첨부
     if (currentMode === 'i2v' && window._galleryAnimateImages && window._galleryAnimateImages.length) {
@@ -273,9 +482,10 @@ document.getElementById('btn-run').addEventListener('click', async () => {
   currentGroupId = groupId;
 
   showRunningUI();
-  setStatus(`배치 전송 중... (${prompts.length}개)`, 'info');
-  setProgress(0, prompts.length);
-  addLog(`배치 시작: ${prompts.length}개 프롬프트 | 모드: ${currentMode} | 폴더: ${folderName}`, 'info');
+  setStatus(`배치 전송 중... (${promptRefMap.length}개)`, 'info');
+  setProgress(0, promptRefMap.length);
+  const refCnt = promptRefMap.filter(r => r.hasRef).length;
+  addLog(`배치 시작: ${promptRefMap.length}개 프롬프트 (${refCnt}개 캐릭터 매핑) | 모드: ${currentMode} | 폴더: ${folderName}`, 'info');
 
   // 갤러리 영상 변환 이미지 사용 후 초기화
   window._galleryAnimateImages = null;
@@ -298,7 +508,7 @@ document.getElementById('btn-run').addEventListener('click', async () => {
       resetRunUI(); return;
     }
     currentGroupId = res.groupId;
-    setStatus(`실행 중... (${prompts.length}개)`, 'info');
+    setStatus(`실행 중... (${promptRefMap.length}개)`, 'info');
     startPolling(res.groupId);
   });
 });
@@ -369,7 +579,7 @@ document.getElementById('btn-clear').addEventListener('click', () => {
 // ─────────────────────────────────────────────
 // 버그 신고
 // ─────────────────────────────────────────────
-document.getElementById('btn-report').addEventListener('click', () => {
+document.getElementById('btn-report')?.addEventListener('click', () => {
   chrome.tabs.create({ url: 'https://github.com/' });
 });
 
@@ -549,7 +759,8 @@ document.getElementById('btn-pick-folder').addEventListener('click', async () =>
   try {
     dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
     document.getElementById('folder-name').value = dirHandle.name;
-    document.getElementById('folder-hint').textContent = `✅ 직접 지정: ${dirHandle.name}`;
+    const hintEl = document.getElementById('folder-hint');
+    if (hintEl) hintEl.textContent = `직접 지정: ${dirHandle.name}`;
     addLog(`저장 폴더 선택됨: ${dirHandle.name}`, 'success');
   } catch (e) {
     if (e.name !== 'AbortError') {
@@ -760,8 +971,8 @@ document.getElementById('btn-animate-images').addEventListener('click', () => {
   const selected = galleryItems.filter(i => i.selected && i.type === 'img');
   if (!selected.length) { addLog('영상 변환: 이미지를 선택하세요.', 'warning'); return; }
   // i2v 모드로 전환
-  document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
-  const i2vBtn = document.querySelector('.mode-btn[data-mode="i2v"]');
+  document.querySelectorAll('.mode-tab').forEach(b => b.classList.remove('active'));
+  const i2vBtn = document.querySelector('.mode-tab[data-mode="i2v"]');
   if (i2vBtn) i2vBtn.classList.add('active');
   currentMode = 'i2v';
   // 선택된 이미지 URL을 프롬프트에 메타데이터로 저장
