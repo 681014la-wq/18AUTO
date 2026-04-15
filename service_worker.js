@@ -202,6 +202,51 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  // Content Script → APPEND_TEXT (커서 위치에 텍스트 추가 — selectAll 없이)
+  // @에셋 참조 삽입 후 프롬프트 텍스트를 이어서 입력할 때 사용
+  if (msg.type === 'APPEND_TEXT') {
+    const tabId = sender.tab?.id;
+    if (!tabId) { sendResponse({ ok: false, error: 'no tab' }); return false; }
+    chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      func: (text) => {
+        return new Promise(async (resolve) => {
+          const sleep = ms => new Promise(r => setTimeout(r, ms));
+          const el = document.querySelector('div[data-slate-editor="true"]')
+                  || document.querySelector('div[contenteditable="true"]');
+          if (!el) { resolve('NO_EDITOR'); return; }
+
+          el.focus();
+          await sleep(100);
+
+          // 커서를 에디터 끝으로 이동
+          const sel = window.getSelection();
+          if (sel) {
+            sel.collapseToEnd();
+          }
+          await sleep(80);
+
+          // beforeinput insertText — 현재 커서 위치에 삽입 (selectAll 없음)
+          el.dispatchEvent(new InputEvent('beforeinput', {
+            bubbles: true, cancelable: true,
+            inputType: 'insertText', data: text,
+          }));
+          await sleep(100);
+
+          resolve('OK_APPEND');
+        });
+      },
+      args: [msg.text]
+    }).then(results => {
+      const r = results?.[0]?.result || 'UNKNOWN';
+      sendResponse({ ok: r.startsWith('OK'), result: r });
+    }).catch(e => {
+      sendResponse({ ok: false, error: e.message });
+    });
+    return true;
+  }
+
   // Content Script → INJECT_TEXT (MAIN world Slate 입력)
   if (msg.type === 'INJECT_TEXT') {
     const tabId = sender.tab?.id;
