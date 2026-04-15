@@ -682,6 +682,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
   if (msg.type === 'STOP_BATCH') {
     stopRequested = true;
+    batchRunning = false;
     sendResponse({ ok: true });
     return true;
   }
