@@ -465,8 +465,8 @@ document.getElementById('btn-run').addEventListener('click', async () => {
       downloadImageQuality: dlImage,
       autoRename,
     };
-    // 캐릭터 참조 — 파이프 매핑 또는 프리셋 활성화 시 이미지 첨부
-    const shouldAttachRef = (item.hasRef && item.charName) || activePreset;
+    // 캐릭터 참조 — 파이프 매핑된 프롬프트에만 이미지 첨부 (미매핑 = 스킵)
+    const shouldAttachRef = item.hasRef;
     if (shouldAttachRef && characterImages.length) {
       payload.characterImages = characterImages.map(m => ({ name: m.name, dataUrl: m.dataUrl, fileName: m.fileName }));
     }
