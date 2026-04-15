@@ -503,45 +503,49 @@ async function runOnePrompt(payload, index, total) {
     closeBtns.forEach(b => b.click());
     await sleep(200);
 
-    // 2.5) 레퍼런스 이미지 업로드 (텍스트 입력 전)
+    // 2.5) 레퍼런스 이미지 업로드 (텍스트 입력 전! — 원본 VEO Automation 순서)
+    // 이미지를 먼저 올려야 Slate 텍스트 입력이 깨지지 않음
     if (hasRefImages && ['i2i', 'c2v', 'i2v'].includes(payload.mode)) {
       setStatus(`[${index+1}/${total}] 캐릭터 이미지 업로드 중...`, 'running');
-      // 첫 번째 이미지 1장만 업로드 (1장이면 충분)
-      const img = characterImgs[0];
-      sendLog(`이미지 업로드: ${img.fileName || img.name}`, 'info');
-      try {
-        const uploadRes = await chrome.runtime.sendMessage({
-          type: 'UPLOAD_IMAGE_V2',
-          dataUrl: img.dataUrl,
-          fileName: img.fileName || `${img.name}.png`,
-        });
-        sendLog(`V2 결과: ${JSON.stringify(uploadRes)}`, uploadRes?.ok ? 'success' : 'error');
-        if (!uploadRes?.ok) {
-          sendLog('V2 실패 — V1 fallback', 'warning');
-          const v1Res = await chrome.runtime.sendMessage({
-            type: 'UPLOAD_IMAGE',
+      for (const img of characterImgs) {
+        sendLog(`이미지 업로드: ${img.fileName || img.name}`, 'info');
+        try {
+          const uploadRes = await chrome.runtime.sendMessage({
+            type: 'UPLOAD_IMAGE_V2',
             dataUrl: img.dataUrl,
             fileName: img.fileName || `${img.name}.png`,
           });
-          sendLog(`V1 결과: ${JSON.stringify(v1Res)}`, v1Res?.ok ? 'success' : 'error');
+          sendLog(`이미지 업로드 결과: ${JSON.stringify(uploadRes)}`, uploadRes?.ok ? 'success' : 'error');
+          if (!uploadRes?.ok) {
+            sendLog('V2 실패 — V1 fallback', 'warning');
+            const v1Res = await chrome.runtime.sendMessage({
+              type: 'UPLOAD_IMAGE',
+              dataUrl: img.dataUrl,
+              fileName: img.fileName || `${img.name}.png`,
+            });
+            sendLog(`V1 결과: ${JSON.stringify(v1Res)}`, v1Res?.ok ? 'success' : 'error');
+          }
+          await sleep(2000); // 이미지 처리 완료 대기
+        } catch (e) {
+          sendLog(`이미지 업로드 실패: ${e.message}`, 'error');
         }
-        await sleep(2000);
-      } catch (e) {
-        sendLog(`이미지 업로드 실패: ${e.message}`, 'error');
       }
+      // 이미지 업로드 후 안정화 대기
       await sleep(1500);
+    }
 
-      // 이미지 업로드 후 입력창 재탐색
+    // 3) 프롬프트 입력 (이미지 업로드 완료 후)
+    setStatus(`[${index+1}/${total}] 입력 중... (시도 ${attempt})`, 'running');
+    sendLog(`프롬프트 입력 시작 (${prompt.length}자)`, 'info');
+
+    // 이미지 업로드 후 입력창 재탐색 (DOM 변경 가능)
+    if (hasRefImages && ['i2i', 'c2v', 'i2v'].includes(payload.mode)) {
       inputEl = findInputEl();
       if (!inputEl) {
         sendLog('이미지 업로드 후 입력창 재탐색 실패', 'error');
         await sleep(2000); continue;
       }
     }
-
-    // 3) 프롬프트 입력
-    setStatus(`[${index+1}/${total}] 입력 중... (시도 ${attempt})`, 'running');
-    sendLog(`프롬프트 입력 시작 (${prompt.length}자)`, 'info');
 
     await setPromptText(inputEl, prompt);
 
