@@ -503,30 +503,47 @@ async function runOnePrompt(payload, index, total) {
     closeBtns.forEach(b => b.click());
     await sleep(200);
 
-    // 2.5) @에셋 참조 삽입 (원본 VEO Automation 방식)
-    // Flow에 사전 업로드된 에셋을 @멘션으로 참조 → 높은 캐릭터 일관성
-    // 이미지 업로드(V2) 대신 @참조 사용 — 1장이면 90% 일관성 달성
-    let usedAssetRef = false;
+    // 2.5) 레퍼런스 이미지 업로드 (텍스트 입력 전)
     if (hasRefImages && ['i2i', 'c2v', 'i2v'].includes(payload.mode)) {
-      setStatus(`[${index+1}/${total}] @에셋 참조 삽입 중...`, 'running');
-      const refImg = characterImgs[0]; // 첫 번째 이미지만 참조 (1장이면 충분)
-      const assetName = refImg.name || refImg.fileName?.replace(/\.[^.]+$/, '') || '캐릭터';
-      sendLog(`@에셋 참조: ${assetName}`, 'info');
-      await insertAssetReference(inputEl, assetName);
-      usedAssetRef = true;
-      await sleep(500);
+      setStatus(`[${index+1}/${total}] 캐릭터 이미지 업로드 중...`, 'running');
+      // 첫 번째 이미지 1장만 업로드 (1장이면 충분)
+      const img = characterImgs[0];
+      sendLog(`이미지 업로드: ${img.fileName || img.name}`, 'info');
+      try {
+        const uploadRes = await chrome.runtime.sendMessage({
+          type: 'UPLOAD_IMAGE_V2',
+          dataUrl: img.dataUrl,
+          fileName: img.fileName || `${img.name}.png`,
+        });
+        sendLog(`V2 결과: ${JSON.stringify(uploadRes)}`, uploadRes?.ok ? 'success' : 'error');
+        if (!uploadRes?.ok) {
+          sendLog('V2 실패 — V1 fallback', 'warning');
+          const v1Res = await chrome.runtime.sendMessage({
+            type: 'UPLOAD_IMAGE',
+            dataUrl: img.dataUrl,
+            fileName: img.fileName || `${img.name}.png`,
+          });
+          sendLog(`V1 결과: ${JSON.stringify(v1Res)}`, v1Res?.ok ? 'success' : 'error');
+        }
+        await sleep(2000);
+      } catch (e) {
+        sendLog(`이미지 업로드 실패: ${e.message}`, 'error');
+      }
+      await sleep(1500);
+
+      // 이미지 업로드 후 입력창 재탐색
+      inputEl = findInputEl();
+      if (!inputEl) {
+        sendLog('이미지 업로드 후 입력창 재탐색 실패', 'error');
+        await sleep(2000); continue;
+      }
     }
 
     // 3) 프롬프트 입력
     setStatus(`[${index+1}/${total}] 입력 중... (시도 ${attempt})`, 'running');
     sendLog(`프롬프트 입력 시작 (${prompt.length}자)`, 'info');
 
-    if (usedAssetRef) {
-      // @참조 뒤에 프롬프트 텍스트 추가 (기존 @참조 유지)
-      await appendPromptText(inputEl, prompt);
-    } else {
-      await setPromptText(inputEl, prompt);
-    }
+    await setPromptText(inputEl, prompt);
 
     // Slate: placeholder 체크 2초간 재시도
     let typed = '';
