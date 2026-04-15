@@ -164,24 +164,6 @@ async function insertAssetReference(el, assetName) {
 }
 
 // ─────────────────────────────────────────────
-// 프롬프트 추가 입력 — @참조 뒤에 텍스트 이어붙이기
-// ─────────────────────────────────────────────
-async function appendPromptText(el, text) {
-  el.focus();
-  await sleep(200);
-  try {
-    const res = await chrome.runtime.sendMessage({ type: 'APPEND_TEXT', text });
-    sendLog(`텍스트 추가: ${JSON.stringify(res)}`, res?.ok ? 'success' : 'error');
-    if (res?.ok) { await sleep(800); return; }
-  } catch (e) {
-    sendLog(`텍스트 추가 실패: ${e.message}`, 'error');
-  }
-  // fallback: execCommand
-  document.execCommand('insertText', false, text);
-  await sleep(800);
-}
-
-// ─────────────────────────────────────────────
 // 프롬프트 입력 — beforeinput (VEO Automation 원본 방식)
 // ─────────────────────────────────────────────
 async function setPromptText(el, text) {
@@ -686,7 +668,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
   if (msg.type === 'STOP_BATCH') {
     stopRequested = true;
-    batchRunning = false;
     sendResponse({ ok: true });
     return true;
   }
