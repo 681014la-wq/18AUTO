@@ -253,7 +253,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
-  // Content Script → CLICK_GENERATE (MAIN world 버튼 탐색+클릭)
+  // Content Script → CLICK_GENERATE (원본: button:has(i:contains("arrow_forward")))
   if (msg.type === 'CLICK_GENERATE') {
     const tabId = sender.tab?.id;
     if (!tabId) { sendResponse({ ok: false }); return false; }
@@ -261,70 +261,56 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       target: { tabId },
       world: 'MAIN',
       func: () => {
-        // Shadow DOM 포함 전체 버튼 탐색
-        const allBtns = [];
-        function collect(root) {
-          root.querySelectorAll('button,[role="button"],[tabindex="0"]').forEach(b => allBtns.push(b));
-          root.querySelectorAll('*').forEach(el => { if (el.shadowRoot) collect(el.shadowRoot); });
+        // 원본 셀렉터: button:has(i:contains("arrow_forward"))
+        // 아이콘 텍스트로 버튼 찾기 (i, span, mat-icon 등 모든 아이콘 태그)
+        function findBtnByIcon(iconText) {
+          const btns = document.querySelectorAll('button');
+          for (const b of btns) {
+            for (const child of b.querySelectorAll('i, span, mat-icon, [class*="material"]')) {
+              if (child.textContent.trim() === iconText) return b;
+            }
+          }
+          return null;
         }
-        collect(document);
 
-        const DENY = ['search','검색','menu','close','닫기','more','settings','설정','filter','필터','back','뒤로','add_2','upload','업로드','이미지 업로드'];
-        const isGood = b => {
-          if (b.disabled || b.getAttribute('aria-disabled') === 'true') return false;
-          if (b.offsetParent === null && !b.closest('[open]')) return false;
-          const t = (b.innerText || b.getAttribute('aria-label') || '').toLowerCase().trim();
-          if (DENY.some(d => t.includes(d))) return false;
-          return true;
-        };
+        // 1순위: arrow_forward 아이콘 (원본 VEO 셀렉터)
+        const submitBtn = findBtnByIcon('arrow_forward');
+        if (submitBtn) {
+          submitBtn.click();
+          return 'CLICKED_ARROW_FORWARD';
+        }
 
-        const input = document.querySelector('div[data-slate-editor="true"]')
-                   || document.querySelector('div[contenteditable="true"]')
-                   || document.querySelector('textarea');
+        // 2순위: send 아이콘
+        const sendBtn = findBtnByIcon('send');
+        if (sendBtn) {
+          sendBtn.click();
+          return 'CLICKED_SEND';
+        }
 
-        // 1순위: 입력창 하단 가장 오른쪽 버튼 (파란 화살표 = 생성 버튼)
+        // 3순위: 입력창 근처 버튼 (위치 기반 fallback)
+        const input = document.querySelector('div[role="textbox"]')
+                   || document.querySelector('div[data-slate-editor="true"]')
+                   || document.querySelector('div[contenteditable="true"]');
         if (input) {
+          const allBtns = [...document.querySelectorAll('button')];
           const inputRect = input.getBoundingClientRect();
           const nearby = allBtns.filter(b => {
-            if (!isGood(b)) return false;
+            if (b.disabled) return false;
             const r = b.getBoundingClientRect();
             return r.width > 0 && r.height > 0
-              && r.top >= inputRect.top - 30 && r.top <= inputRect.bottom + 150;
+              && r.top >= inputRect.top - 30 && r.top <= inputRect.bottom + 80;
           });
           if (nearby.length) {
-            // 가장 오른쪽 + 아래쪽 버튼 = submit/send 버튼
             nearby.sort((a, b) => {
               const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
-              return (rb.right + rb.bottom) - (ra.right + ra.bottom);
+              return rb.right - ra.right; // 가장 오른쪽 버튼
             });
-            const btn = nearby[0];
-            btn.click();
-            return 'CLICKED_NEARBY:' + (btn.innerText || btn.getAttribute('aria-label') || 'icon').trim().slice(0,30);
+            nearby[0].click();
+            return 'CLICKED_NEARBY:' + (nearby[0].textContent || '').trim().slice(0, 30);
           }
         }
 
-        // 2순위: 텍스트에 만들기/생성/create/generate (add_2 제외됨)
-        const ALLOW = ['만들기','생성','generate','create'];
-        for (const b of allBtns) {
-          if (!isGood(b)) continue;
-          const t = (b.innerText || b.getAttribute('aria-label') || '').toLowerCase();
-          if (ALLOW.some(k => t.includes(k))) { b.click(); return 'CLICKED_TEXT:' + t.trim().slice(0,30); }
-        }
-
-        // 3순위: 페이지 하단 마지막 버튼
-        const vh = window.innerHeight;
-        const bottom = allBtns.filter(b => {
-          if (!isGood(b)) return false;
-          const r = b.getBoundingClientRect();
-          return r.top > vh * 0.5 && r.width > 20;
-        });
-        if (bottom.length) {
-          const btn = bottom[bottom.length - 1];
-          btn.click();
-          return 'CLICKED_BOTTOM:' + (btn.innerText || btn.getAttribute('aria-label') || 'icon').trim().slice(0,30);
-        }
-
-        return 'NO_BTN:total=' + allBtns.length + ',good=' + allBtns.filter(isGood).length;
+        return 'NO_BTN';
       },
       args: []
     }).then(results => {
@@ -354,12 +340,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
             // ── jQuery 셀렉터 → Vanilla JS 유틸 ──
             // button:has(i:contains("text")) → 아이콘 텍스트로 버튼 찾기
+            // Flow는 아이콘을 <i>, <span>, <mat-icon>, class="material-*" 등 다양하게 렌더링
             function findBtnByIcon(iconText, scope) {
               const root = scope || document;
               const btns = root.querySelectorAll('button');
               for (const b of btns) {
-                const icon = b.querySelector('i');
-                if (icon && icon.textContent.trim() === iconText) return b;
+                // 모든 자식 요소 검색 (i, span, mat-icon 등)
+                for (const child of b.querySelectorAll('i, span, mat-icon, [class*="material"]')) {
+                  const t = child.textContent.trim();
+                  if (t === iconText) return b;
+                }
+                // 버튼 직계 텍스트 노드도 확인
+                if (b.textContent.trim() === iconText) return b;
               }
               return null;
             }

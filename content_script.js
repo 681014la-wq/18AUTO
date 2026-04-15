@@ -715,6 +715,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'INSPECT_DOM') {
     const inputEl = findInputEl();
     const genBtn  = findGenerateButton();
+    // 아이콘 구조 디버그: 버튼 안의 아이콘 텍스트 수집
+    const iconInfo = [];
+    document.querySelectorAll('button').forEach((b, idx) => {
+      if (idx > 30) return; // 최대 30개
+      const icons = [];
+      b.querySelectorAll('i, span, mat-icon, [class*="material"]').forEach(child => {
+        const t = child.textContent.trim();
+        if (t && t.length < 30) icons.push({ tag: child.tagName, text: t, class: child.className?.substring(0, 50) });
+      });
+      if (icons.length > 0) iconInfo.push({ btnIdx: idx, btnText: (b.textContent || '').trim().substring(0, 30), icons });
+    });
     sendResponse({
       slateEditor:       !!inputEl,
       slateText:         inputEl ? (inputEl.innerText || '').substring(0, 200) : null,
@@ -723,6 +734,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       batchRunning,
       url:       location.href,
       tileCount: document.querySelectorAll('[data-tile-id]').length,
+      iconInfo,
     });
     return true;
   }
