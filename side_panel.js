@@ -16,8 +16,15 @@ setInterval(checkFlowTab, 3000);
 chrome.tabs.onActivated.addListener(checkFlowTab);
 chrome.tabs.onUpdated.addListener((id, info) => { if (info.status === 'complete') checkFlowTab(); });
 
-document.getElementById('btn-goto-flow').addEventListener('click', () => {
-  chrome.tabs.create({ url: 'https://labs.google/fx/tools/flow' });
+document.getElementById('btn-goto-flow').addEventListener('click', async () => {
+  // 이미 열려있는 Flow 탭이 있으면 그쪽으로 전환, 없으면 새 탭 생성
+  const tabs = await chrome.tabs.query({ url: 'https://labs.google/*' });
+  if (tabs.length > 0) {
+    chrome.tabs.update(tabs[0].id, { active: true });
+    chrome.windows.update(tabs[0].windowId, { focused: true });
+  } else {
+    chrome.tabs.create({ url: 'https://labs.google/fx/tools/flow' });
+  }
 });
 
 // ─────────────────────────────────────────────
