@@ -334,11 +334,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
-  // Content Script → UPLOAD_IMAGE_V2 (Flow UI 에셋 피커 경유)
-  // 1) "+" 버튼 클릭 → 에셋 피커 오픈
-  // 2) "이미지 업로드" 버튼 클릭 → file input 트리거
-  // 3) DataTransfer로 파일 주입 → change 이벤트
-  // 4) 에셋 피커 닫기 → 이미지 선택 대기
+  // Content Script → UPLOAD_IMAGE_V2 (원본 VEO Automation 방식 — jQuery 셀렉터→Vanilla JS 변환)
+  // 흐름: addImageButton → selectUploadImageType → sort → search → select (or upload → search → select)
   if (msg.type === 'UPLOAD_IMAGE_V2') {
     const tabId = sender.tab?.id;
     if (!tabId) { sendResponse({ ok: false, error: 'no tab' }); return false; }
@@ -353,29 +350,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             const resp = await fetch(dataUrl);
             const blob = await resp.blob();
             const file = new File([blob], fileName, { type: blob.type || 'image/png' });
+            const searchName = fileName.replace(/\.[^.]+$/, '');
 
-            // 유틸: Shadow DOM 포함 전체 수집
-            function collectAll(root, selector) {
-              const result = [];
-              root.querySelectorAll(selector).forEach(el => result.push(el));
-              root.querySelectorAll('*').forEach(el => {
-                if (el.shadowRoot) collectAll(el.shadowRoot, selector).forEach(e => result.push(e));
-              });
-              return result;
-            }
-
-            // ── 원본 VEO Automation 셀렉터 (remote config에서 추출) ──
-            // addImageButton: button:has(i:contains("add_2"))
-            // selectUploadImageType: div[data-side="top"] button:has(i:contains("image"))
-            // sortOptionsButton: div[data-side="top"] button[aria-haspopup="menu"]:last()
-            // sortLatestOption: div[role="menu"] > button:eq(2)
-            // searchUploadedImage: div[data-side="top"] input[type="text"]
-            // virtuosoItemList: div[data-side="top"] div[data-testid="virtuoso-item-list"] > div
-            // fileInput: input[type="file"]
-
-            // jQuery :has/:contains 대응 유틸
-            function findBtnWithIcon(iconText) {
-              const btns = document.querySelectorAll('button');
+            // ── jQuery 셀렉터 → Vanilla JS 유틸 ──
+            // button:has(i:contains("text")) → 아이콘 텍스트로 버튼 찾기
+            function findBtnByIcon(iconText, scope) {
+              const root = scope || document;
+              const btns = root.querySelectorAll('button');
               for (const b of btns) {
                 const icon = b.querySelector('i');
                 if (icon && icon.textContent.trim() === iconText) return b;
@@ -383,52 +364,48 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               return null;
             }
 
-            // ── 1단계: "add_2" 아이콘 버튼 클릭 (에셋 피커 열기) ──
-            let addBtn = findBtnWithIcon('add_2');
-            if (!addBtn) {
-              // fallback: "add" 아이콘
-              addBtn = findBtnWithIcon('add');
-            }
-            if (!addBtn) {
-              resolve('FAIL:NO_ADD_BTN');
-              return;
-            }
+            // ── 1단계: addImageButton 클릭 (에셋 피커 열기) ──
+            // 원본: button:has(i:contains("add_2"))
+            let addBtn = findBtnByIcon('add_2');
+            if (!addBtn) addBtn = findBtnByIcon('add');
+            if (!addBtn) { resolve('FAIL:NO_ADD_BTN'); return; }
 
             addBtn.click();
             await sleep(1200);
 
-            // ── 2단계: "image" 아이콘 버튼 (업로드 타입 선택) ──
-            const uploadTypeBtn = document.querySelector('div[data-side="top"] button');
-            if (uploadTypeBtn) {
-              // "image" 아이콘 버튼이 있으면 클릭
-              const imgBtns = document.querySelectorAll('div[data-side="top"] button');
-              for (const b of imgBtns) {
-                const icon = b.querySelector('i');
-                if (icon && icon.textContent.trim() === 'image') {
-                  b.click();
-                  await sleep(500);
-                  break;
-                }
-              }
-            }
-
-            // ── 3단계: 정렬 → 최신순 ──
-            const sortBtn = document.querySelector('div[data-side="top"] button[aria-haspopup="menu"]:last-of-type');
-            if (sortBtn) {
-              sortBtn.click();
-              await sleep(500);
-              // 세 번째 버튼 = 최신순
-              const menuBtns = document.querySelectorAll('div[role="menu"] > button');
-              if (menuBtns.length > 2) {
-                menuBtns[2].click();
+            // ── 2단계: selectUploadImageType (이미지 탭 선택) ──
+            // 원본: div[data-side="top"] button:has(i:contains("image"))
+            // ※ 존재할 때만 클릭 (원본: i().length > 0 체크)
+            const topPanel = document.querySelector('div[data-side="top"]');
+            if (topPanel) {
+              const imgBtn = findBtnByIcon('image', topPanel);
+              if (imgBtn) {
+                imgBtn.click();
                 await sleep(500);
               }
             }
 
-            // ── 4단계: 검색 필드에 파일명 입력 ──
-            const searchInput = document.querySelector('div[data-side="top"] input[type="text"]');
+            // ── 3단계: sortOptionsButton → sortLatestOption ──
+            // 원본: div[data-side="top"] button[aria-haspopup="menu"]:last()
+            if (topPanel) {
+              const sortBtns = topPanel.querySelectorAll('button[aria-haspopup="menu"]');
+              const sortBtn = sortBtns.length > 0 ? sortBtns[sortBtns.length - 1] : null;
+              if (sortBtn) {
+                sortBtn.click();
+                await sleep(500);
+                // 원본: div[role="menu"] > button:eq(2)  → 세 번째 버튼 = 최신순
+                const menuBtns = document.querySelectorAll('div[role="menu"] > button');
+                if (menuBtns.length > 2) {
+                  menuBtns[2].click();
+                  await sleep(500);
+                }
+              }
+            }
+
+            // ── 4단계: searchUploadedImage → 파일명 검색 ──
+            // 원본: div[data-side="top"] input[type="text"]
+            const searchInput = topPanel?.querySelector('input[type="text"]');
             if (searchInput) {
-              const searchName = fileName.replace(/\.[^.]+$/, '');
               searchInput.focus();
               searchInput.click();
               await sleep(200);
@@ -438,28 +415,36 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               searchInput.dispatchEvent(new Event('input', { bubbles: true }));
               await sleep(1500);
 
-              // 검색 결과에서 이미지 선택
-              const items = document.querySelectorAll('div[data-side="top"] div[data-testid="virtuoso-item-list"] > div');
-              if (items.length > 0) {
-                const img = items[0].querySelector('img');
-                if (img) { img.click(); await sleep(500); resolve('OK_SEARCH_SELECT'); return; }
-                items[0].click(); await sleep(500); resolve('OK_SEARCH_SELECT'); return;
+              // 원본: virtuosoItemList:first:has(div:contains("name"))
+              const items = topPanel?.querySelectorAll('div[data-testid="virtuoso-item-list"] > div') || [];
+              // 파일명 매칭 항목 우선
+              let matched = [...items].find(el => el.textContent?.includes(searchName));
+              if (!matched && items.length > 0) matched = items[0]; // 없으면 첫 번째
+              if (matched) {
+                const img = matched.querySelector('img');
+                if (img) img.click();
+                else matched.click();
+                await sleep(500);
+                resolve('OK_SEARCH_SELECT');
+                return;
               }
             }
 
-            // ── 5단계: 검색 실패 시 → 파일 직접 업로드 ──
-            // fileInput 찾기
+            // ── 5단계: 검색 실패 → fileInput으로 직접 업로드 ──
+            // 원본: input[type="file"] + DataTransfer
             let fileInput = document.querySelector('input[type="file"]');
             if (!fileInput) {
-              // "이미지 업로드" 텍스트 버튼 클릭하여 file input 트리거
-              const allEls = document.querySelectorAll('div[data-side="top"] *');
-              for (const el of allEls) {
-                const t = (el.textContent || '').trim();
-                if (t === '이미지 업로드' || t === 'Image upload' || t === 'Upload image') {
-                  el.click();
-                  await sleep(800);
-                  fileInput = document.querySelector('input[type="file"]');
-                  break;
+              // file input이 아직 안 보이면 업로드 버튼 찾아서 클릭
+              if (topPanel) {
+                const allEls = topPanel.querySelectorAll('*');
+                for (const el of allEls) {
+                  const t = (el.textContent || '').trim();
+                  if (t === '이미지 업로드' || t === 'Image upload' || t === 'Upload image' || t === 'Upload') {
+                    el.click();
+                    await sleep(800);
+                    fileInput = document.querySelector('input[type="file"]');
+                    break;
+                  }
                 }
               }
             }
@@ -473,26 +458,26 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               // 업로드 완료 대기 (최대 30초)
               for (let check = 0; check < 60; check++) {
                 await sleep(500);
-                // 페이지 내 %가 포함된 텍스트 확인
                 const allText = document.body.innerText || '';
                 if (allText.includes('100%') || (!allText.match(/\d+%/) && check > 10)) break;
               }
               await sleep(1500);
 
-              // 업로드 후 에셋 검색하여 선택
+              // 업로드 후 검색하여 선택
               if (searchInput) {
-                const searchName = fileName.replace(/\.[^.]+$/, '');
                 const ns = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
                 if (ns) ns.call(searchInput, searchName);
                 else searchInput.value = searchName;
                 searchInput.dispatchEvent(new Event('input', { bubbles: true }));
                 await sleep(1500);
 
-                const items2 = document.querySelectorAll('div[data-side="top"] div[data-testid="virtuoso-item-list"] > div');
-                if (items2.length > 0) {
-                  const img2 = items2[0].querySelector('img');
+                const items2 = topPanel?.querySelectorAll('div[data-testid="virtuoso-item-list"] > div') || [];
+                let matched2 = [...items2].find(el => el.textContent?.includes(searchName));
+                if (!matched2 && items2.length > 0) matched2 = items2[0];
+                if (matched2) {
+                  const img2 = matched2.querySelector('img');
                   if (img2) img2.click();
-                  else items2[0].click();
+                  else matched2.click();
                   await sleep(500);
                 }
               }
