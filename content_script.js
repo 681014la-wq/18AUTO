@@ -312,12 +312,12 @@ function collectNewUrls(existing) {
   const found = [];
   document.querySelectorAll('[data-tile-id],img[src],video[src],[style*="background-image"]').forEach(node => {
     if (node.tagName === 'IMG') {
-      const url = node.getAttribute('src') || '';
+      const url = node.src || '';
       if (isValidUrl(url, 'img', node) && !existing.has(url)) found.push({ url, type: 'img' });
       return;
     }
     if (node.tagName === 'VIDEO') {
-      const url = node.getAttribute('src') || '';
+      const url = node.src || '';
       if (isValidUrl(url, 'video', node) && !existing.has(url)) found.push({ url, type: 'video' });
       return;
     }
@@ -326,12 +326,12 @@ function collectNewUrls(existing) {
 
     const ni = node.querySelector?.('img[src]');
     if (ni) {
-      const url = ni.getAttribute('src') || '';
+      const url = ni.src || '';
       if (isValidUrl(url, 'img', ni) && !existing.has(url)) found.push({ url, type: 'img' });
     }
     const nv = node.querySelector?.('video[src]');
     if (nv) {
-      const url = nv.getAttribute('src') || '';
+      const url = nv.src || '';
       if (isValidUrl(url, 'video', nv) && !existing.has(url)) found.push({ url, type: 'video' });
     }
   });
@@ -349,6 +349,8 @@ function waitForOutputs(outputCount, existing, timeoutMs = 300000) {
     let observer = null;
     let intervalId = null;
     let timeoutId = null;
+    let graceId = null;
+    let safetyId = null;  // 안전 타임아웃: 1개 감지 후 30초 내 나머지 대기
 
     const finish = items => {
       if (done) return;
@@ -356,14 +358,31 @@ function waitForOutputs(outputCount, existing, timeoutMs = 300000) {
       if (observer)    observer.disconnect();
       if (intervalId)  clearInterval(intervalId);
       if (timeoutId)   clearTimeout(timeoutId);
+      if (graceId)     clearTimeout(graceId);
+      if (safetyId)    clearTimeout(safetyId);
       resolve({ ok: items.length >= outputCount, urls: items });
     };
 
     const check = () => {
       const items = collectNewUrls(existing);
-      if (items.length >= outputCount) {
-        console.log(`[VeoAuto] 완료 감지: ${items.length}개`);
-        finish(items);
+      if (items.length >= outputCount && !graceId) {
+        // outputCount 도달 → 유예 시작: observer/interval 정리 후 5초 뒤 최종 수집
+        console.log(`[VeoAuto] ${items.length}개 감지 — 5초 유예 시작`);
+        if (observer)   { observer.disconnect(); observer = null; }
+        if (intervalId) { clearInterval(intervalId); intervalId = null; }
+        graceId = setTimeout(() => {
+          const final = collectNewUrls(existing);
+          console.log(`[VeoAuto] 유예 완료: ${final.length}개`);
+          finish(final);
+        }, 5000);
+      } else if (items.length > 0 && items.length < outputCount && !safetyId) {
+        // 1개 이상 감지했지만 outputCount 미달 → 30초 안전 타임아웃 시작
+        console.log(`[VeoAuto] ${items.length}개 감지 (목표 ${outputCount}) — 30초 안전 타임아웃 시작`);
+        safetyId = setTimeout(() => {
+          const final = collectNewUrls(existing);
+          console.log(`[VeoAuto] 안전 타임아웃: ${final.length}개 (목표 ${outputCount})`);
+          finish(final);
+        }, 30000);
       }
     };
 
@@ -422,25 +441,36 @@ async function triggerDownload(url, filename, folder) {
   if (!url || url === 'about:blank') return;
   if (url.startsWith('/')) url = location.origin + url;
 
-  // 1순위: blob → anchor
+  // blob URL → fetch로 일반 URL 변환 후 SW 경유 다운로드
+  // anchor 다운로드는 onDeterminingFilename이 안 먹혀서 폴더 생성이 안 됨
   if (url.startsWith('blob:')) {
-    const a      = document.createElement('a');
-    a.href       = url;
-    a.download   = filename;
-    a.style.display = 'none';
-    document.body.appendChild(a);
-    a.click();
-    setTimeout(() => document.body.removeChild(a), 1000);
-    return;
+    try {
+      const res  = await fetch(url);
+      const blob = await res.blob();
+      // 50MB 이상이면 dataURL 변환 스킵 → anchor fallback
+      if (blob.size > 50 * 1024 * 1024) throw new Error('blob too large for dataUrl');
+      const reader = new FileReader();
+      const dataUrl = await new Promise((resolve, reject) => {
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+      chrome.runtime.sendMessage({ type: 'DOWNLOAD_BLOB', dataUrl, filename, folder });
+      return;
+    } catch (_) {
+      // fallback: anchor (폴더 없이라도 다운로드)
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => document.body.removeChild(a), 1000);
+      return;
+    }
   }
 
-  // 2순위: Side Panel 경유
-  try {
-    const res = await chrome.runtime.sendMessage({ type: 'DOWNLOAD_VIA_PANEL', url, filename });
-    if (res && res.ok) return;
-  } catch (_) { /* fallback */ }
-
-  // 3순위: SW chrome.downloads
+  // SW chrome.downloads — 폴더 경로 포함
   chrome.runtime.sendMessage({ type: 'DOWNLOAD_FILE', url, filename, folder });
 }
 
@@ -583,9 +613,36 @@ async function runOnePrompt(payload, index, total) {
     if (result.ok) {
       setStatus(`[${index+1}/${total}] 다운로드 대기 중...`, 'running');
       await sleep(3000); // 이미지 렌더링 완료 대기
-      setStatus(`[${index+1}/${total}] 다운로드 중... (${result.urls.length}개)`, 'running');
+
+      // 레퍼런스 캐릭터 이미지 필터 — UUID/파일명 기반으로 결과물에서 제외
+      let outputUrls = result.urls;
+      if (hasRefImages) {
+        const refIds = characterImgs.map(img => {
+          const fn = (img.fileName || img.name || '').replace(/\.[^.]+$/, '');
+          return fn.length > 4 ? fn.toLowerCase() : '';
+        }).filter(Boolean);
+        if (refIds.length) {
+          const filtered = outputUrls.filter(({ url }) => {
+            const urlLower = url.toLowerCase();
+            return !refIds.some(id => urlLower.includes(id));
+          });
+          if (filtered.length > 0) {
+            sendLog(`레퍼런스 이미지 ${outputUrls.length - filtered.length}개 제외 (결과물 ${filtered.length}개)`, 'info');
+            outputUrls = filtered;
+          } else {
+            // 필터가 전부 걸러낸 경우 — 필터 무시하고 원본 유지
+            sendLog(`⚠️ 레퍼런스 필터가 전체를 제외함 — 필터 무시 (${outputUrls.length}개 유지)`, 'warning');
+          }
+        }
+      }
+
+      // 폴더명 + 접두사 설정 (원본 VEO 방식: onDeterminingFilename)
+      const prefix = autoRename ? `${promptIndex}_` : '';
+      chrome.runtime.sendMessage({ type: 'SET_FOLDER_NAME', folderName, prefix, autoChangeFileName: true });
+      await sleep(200);
+      setStatus(`[${index+1}/${total}] 다운로드 중... (${outputUrls.length}개)`, 'running');
       const ts = Date.now();
-      result.urls.forEach(({ url, type }, i) => {
+      outputUrls.forEach(({ url, type }, i) => {
         const ext = type === 'video' ? 'mp4' : 'jpg';
         const q   = type === 'video' ? downloadVideoQuality : downloadImageQuality;
         if (q === 'none') { sendLog(`다운로드 스킵 (품질=none): ${url.slice(0,60)}`, 'info'); return; }
@@ -596,7 +653,7 @@ async function runOnePrompt(payload, index, total) {
         triggerDownload(url, name, folderName);
       });
       await sleep(500);
-      setStatus(`[${index+1}/${total}] 완료 (${result.urls.length}개 저장)`, 'done');
+      setStatus(`[${index+1}/${total}] 완료 (${outputUrls.length}개 저장)`, 'done');
       sendLog(`✅ [${index+1}/${total}] 완료!`, 'success');
       return true;
     }

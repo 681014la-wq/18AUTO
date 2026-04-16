@@ -11,6 +11,23 @@ chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
 const activeBatches = new Map(); // groupId → { status, completedCount, failedCount, totalCount, tabId }
 
 // ─────────────────────────────────────────────
+// 다운로드 폴더/파일명 제어 (원본 VEO 방식)
+// onDeterminingFilename으로 다운로드 파일명을 폴더/접두사 포함으로 변경
+// ─────────────────────────────────────────────
+let dlFolder = '';   // "veo-folder-1/"
+let dlPrefix = '';   // "1_promptName_"
+let dlAutoRename = true;
+
+function dlFilenameHandler(downloadItem, suggest) {
+  const isGoogle = downloadItem.url.includes('google');
+  const isSelf = !downloadItem.byExtensionId || downloadItem.byExtensionId === chrome.runtime.id;
+  if (isGoogle && isSelf) {
+    const origName = downloadItem.filename.split('/').pop() || downloadItem.filename;
+    suggest({ filename: `${dlFolder}${dlPrefix}${origName}` });
+  }
+}
+
+// ─────────────────────────────────────────────
 // Keep-Alive — Port onConnect 방식 (연구 결론)
 // Side Panel에서 연결 유지 → SW 절대 수면 안 함
 // ─────────────────────────────────────────────
@@ -100,11 +117,44 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return false;
   }
 
+  // ─── 다운로드 폴더 + 파일명 제어 (원본 VEO 방식) ───
+  // SET_FOLDER_NAME → onDeterminingFilename 리스너로 폴더/접두사 자동 적용
+  if (msg.type === 'SET_FOLDER_NAME') {
+    const { folderName, prefix, autoChangeFileName } = msg;
+    if (typeof folderName === 'string') dlFolder = folderName.trim() ? `${folderName.trim()}/` : '';
+    if (typeof prefix === 'string') dlPrefix = prefix.trim();
+    if (typeof autoChangeFileName === 'boolean') dlAutoRename = autoChangeFileName;
+
+    if (dlAutoRename) {
+      if (!chrome.downloads.onDeterminingFilename.hasListener(dlFilenameHandler)) {
+        chrome.downloads.onDeterminingFilename.addListener(dlFilenameHandler);
+      }
+    } else {
+      if (chrome.downloads.onDeterminingFilename.hasListener(dlFilenameHandler)) {
+        chrome.downloads.onDeterminingFilename.removeListener(dlFilenameHandler);
+      }
+    }
+    sendResponse({ ok: true });
+    return false;
+  }
+
   // Content Script → DOWNLOAD_FILE
   if (msg.type === 'DOWNLOAD_FILE') {
     const { url, filename, folder } = msg;
     chrome.downloads.download({
       url,
+      filename: folder ? `${folder}/${filename}` : filename,
+      conflictAction: 'uniquify',
+    });
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  // Content Script → DOWNLOAD_BLOB (blob URL을 dataUrl로 변환해서 받음 — 폴더 생성 보장)
+  if (msg.type === 'DOWNLOAD_BLOB') {
+    const { dataUrl, filename, folder } = msg;
+    chrome.downloads.download({
+      url: dataUrl,
       filename: folder ? `${folder}/${filename}` : filename,
       conflictAction: 'uniquify',
     });

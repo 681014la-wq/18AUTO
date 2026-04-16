@@ -1,0 +1,9 @@
+{
+  "name": "com.joon.veo",
+  "description": "18AUTO VEO Automation Native Messaging Host",
+  "path": "C:\\20260320_new\\18AUTO\\native-host\\host.bat",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://lpkbjmknknebbamklfjhbdbgfgcbbond/"
+  ]
+}
